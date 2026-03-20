@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp QR Viewer</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            text-align: center;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        #qrcode {
+            margin: 20px auto;
+        }
+        #qrcode img {
+            max-width: 300px;
+            height: auto;
+            border: 2px solid #25d366;
+            border-radius: 10px;
+        }
+        .status {
+            margin: 20px 0;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        .loading { background-color: #fff3cd; color: #856404; }
+        .success { background-color: #d4edda; color: #155724; }
+        .error { background-color: #f8d7da; color: #721c24; }
+        button {
+            background-color: #25d366;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 10px;
+        }
+        button:hover {
+            background-color: #20ba5a;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔗 WhatsApp QR Code</h1>
+        <div id="status" class="status loading">Cargando QR...</div>
+        <div id="qrcode"></div>
+        <button onclick="refreshQR()">🔄 Actualizar QR</button>
+        <button onclick="checkStatus()">📱 Ver Estado</button>
+
+        <div style="margin-top: 30px; text-align: left;">
+            <h3>📱 Instrucciones:</h3>
+            <ol>
+                <li>Abre WhatsApp en tu teléfono</li>
+                <li>Ve a <strong>Configuración</strong> → <strong>Dispositivos vinculados</strong></li>
+                <li>Toca <strong>"Vincular un dispositivo"</strong></li>
+                <li>Escanea el código QR de arriba</li>
+            </ol>
+        </div>
+    </div>
+
+    <script>
+        let statusDiv = document.getElementById('status');
+        let qrcodeDiv = document.getElementById('qrcode');
+
+        async function refreshQR() {
+            try {
+                statusDiv.className = 'status loading';
+                statusDiv.textContent = 'Obteniendo QR del servidor...';
+
+                const response = await fetch('/qr');
+                const data = await response.json();
+
+                if (data.qr) {
+                    // Generar QR usando API de QRServer
+                    const qrData = encodeURIComponent(data.qr);
+                    const qrImageUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${qrData}`;
+
+                    qrcodeDiv.innerHTML = `
+                        <img src="${qrImageUrl}" alt="WhatsApp QR Code"
+                             onerror="this.style.display='none';document.getElementById('backup-qr').style.display='block';" />
+                        <div id="backup-qr" style="display:none;">
+                            <code style="word-break: break-all; font-size: 12px; background: #f0f0f0; padding: 10px; display: block; margin: 10px 0;">${data.qr}</code>
+                            <p>⚠️ Si no puedes ver la imagen, copia el código de arriba y pégalo en cualquier generador de QR online.</p>
+                        </div>
+                    `;
+
+                    statusDiv.className = 'status success';
+                    statusDiv.textContent = '✅ ' + data.message;
+                } else {
+                    statusDiv.className = 'status error';
+                    statusDiv.textContent = data.message || 'Error al obtener QR';
+                }
+            } catch (error) {
+                statusDiv.className = 'status error';
+                statusDiv.textContent = '❌ Error: ' + error.message;
+                console.error('Error:', error);
+            }
+        }
+
+        async function checkStatus() {
+            try {
+                const response = await fetch('/status');
+                const data = await response.json();
+
+                if (data.status === 'connected') {
+                    statusDiv.className = 'status success';
+                    statusDiv.textContent = '✅ WhatsApp conectado correctamente';
+                    qrcodeDiv.innerHTML = '<p style="color: #155724; font-size: 18px;">🎉 ¡Ya está conectado! No necesitas escanear el QR.</p>';
+                } else {
+                    refreshQR();
+                }
+            } catch (error) {
+                console.error('Error checking status:', error);
+                refreshQR();
+            }
+        }
+
+        // Auto-refresh every 5 seconds
+        setInterval(checkStatus, 5000);
+
+        // Load immediately
+        checkStatus();
+    </script>
+</body>
+</html>

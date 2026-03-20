@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp QR - Escanear</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        .container {
+            text-align: center;
+            background: white;
+            padding: 40px;
+            border-radius: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            color: #333;
+        }
+        h1 {
+            margin-bottom: 10px;
+            color: #25D366;
+        }
+        #qr-container {
+            margin: 30px auto;
+            padding: 20px;
+            background: white;
+            border-radius: 10px;
+            display: inline-block;
+        }
+        .status {
+            font-size: 18px;
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 10px;
+            font-weight: bold;
+        }
+        .status.waiting {
+            background: #fff3cd;
+            color: #856404;
+        }
+        .status.connected {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .instructions {
+            margin-top: 20px;
+            text-align: left;
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            line-height: 1.8;
+        }
+        .step {
+            margin: 10px 0;
+        }
+        .step::before {
+            content: "📱 ";
+        }
+        button {
+            margin-top: 20px;
+            padding: 12px 30px;
+            font-size: 16px;
+            background: #25D366;
+            color: white;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        button:hover {
+            background: #128C7E;
+            transform: scale(1.05);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔐 Vincular WhatsApp</h1>
+        <p>Escanea el código QR para vincular tu dispositivo</p>
+
+        <div id="status" class="status waiting">
+            ⏳ Cargando código QR...
+        </div>
+
+        <div id="qr-container"></div>
+
+        <div class="instructions">
+            <div class="step">Abre WhatsApp en tu celular</div>
+            <div class="step">Ve a Configuración > Dispositivos vinculados</div>
+            <div class="step">Toca "Vincular dispositivo"</div>
+            <div class="step">Escanea este código QR</div>
+        </div>
+
+        <button onclick="location.reload()">🔄 Actualizar QR</button>
+    </div>
+
+    <script>
+        async function loadQR() {
+            try {
+                const response = await fetch('/qr');
+                const data = await response.json();
+
+                if (data.qr) {
+                    // Limpiar contenedor
+                    document.getElementById('qr-container').innerHTML = '';
+
+                    // Generar QR visual
+                    new QRCode(document.getElementById('qr-container'), {
+                        text: data.qr,
+                        width: 300,
+                        height: 300,
+                        colorDark: "#000000",
+                        colorLight: "#ffffff",
+                        correctLevel: QRCode.CorrectLevel.L
+                    });
+
+                    document.getElementById('status').className = 'status waiting';
+                    document.getElementById('status').textContent = '📱 Escanea el QR con tu celular';
+
+                    // Actualizar cada 15 segundos
+                    setTimeout(loadQR, 15000);
+                } else if (data.message && data.message.includes('conectado')) {
+                    document.getElementById('status').className = 'status connected';
+                    document.getElementById('status').textContent = '✅ WhatsApp ya está conectado';
+                    document.getElementById('qr-container').innerHTML = '<p style="color: #155724; font-size: 20px;">✓ Dispositivo vinculado correctamente</p>';
+                } else {
+                    document.getElementById('status').className = 'status waiting';
+                    document.getElementById('status').textContent = '⏳ ' + (data.message || 'Generando QR...');
+                    setTimeout(loadQR, 3000);
+                }
+            } catch (error) {
+                document.getElementById('status').className = 'status error';
+                document.getElementById('status').textContent = '❌ Error: ' + error.message;
+                console.error('Error:', error);
+            }
+        }
+
+        // Cargar QR al iniciar
+        loadQR();
+    </script>
+</body>
+</html>

@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+
+# FastAPI / Uvicorn
+*.egg-info/
+dist/
+build/
+
+# Variables de entorno - NO subir al repo
+.env
+
+# Base de datos local
+*.db
+*.sqlite3
+
+# Credenciales - NUNCA subir al repo
+google_credentials.json
+*credentials*.json
+*secret*.json
+
+# Archivos de salida
+output/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# WhatsApp Service
+WhatsAppService/node_modules/
+WhatsAppService/session-data/

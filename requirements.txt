@@ -1,0 +1,30 @@
+# Framework principal
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# Variables de entorno
+python-dotenv==1.0.1
+
+# IA - OpenAI (OCR + extracción de precios)
+openai==1.66.3
+
+# Excel
+openpyxl==3.1.5
+
+# Google Sheets
+gspread==6.1.4
+
+# Base de datos
+sqlalchemy==2.0.36
+asyncpg==0.31.0
+greenlet==3.3.2
+
+# Pydantic settings
+pydantic-settings==2.7.1
+
+# Manejo de imágenes
+Pillow==12.1.1
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.25.2

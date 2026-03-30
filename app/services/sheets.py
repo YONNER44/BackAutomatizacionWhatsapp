@@ -57,19 +57,42 @@ class SheetsService:
         self._client = None
         self._spreadsheet = None
 
+    def _get_sheet_id(self) -> str:
+        from app.services.config_store import get_value
+        return get_value("GOOGLE_SHEET_ID", settings.GOOGLE_SHEET_ID or "")
+
+    def _get_credentials(self):
+        import json as _json
+        from app.services.config_store import get_config
+        config = get_config()
+        creds_str = config.get("GOOGLE_CREDENTIALS_JSON")
+        if creds_str:
+            return Credentials.from_service_account_info(
+                _json.loads(creds_str), scopes=SCOPES
+            )
+        if settings.GOOGLE_APPLICATION_CREDENTIALS:
+            from pathlib import Path
+            if Path(settings.GOOGLE_APPLICATION_CREDENTIALS).exists():
+                return Credentials.from_service_account_file(
+                    settings.GOOGLE_APPLICATION_CREDENTIALS, scopes=SCOPES
+                )
+        raise ValueError("No hay credenciales de Google configuradas. Ve a Configuración para agregarlas.")
+
+    def invalidate_cache(self):
+        self._client = None
+        self._spreadsheet = None
+
     def _get_spreadsheet(self):
         if self._spreadsheet is not None:
             return self._spreadsheet
 
-        if not settings.GOOGLE_APPLICATION_CREDENTIALS or not settings.GOOGLE_SHEET_ID:
-            raise ValueError("Faltan GOOGLE_APPLICATION_CREDENTIALS o GOOGLE_SHEET_ID en .env")
+        sheet_id = self._get_sheet_id()
+        if not sheet_id:
+            raise ValueError("Falta GOOGLE_SHEET_ID. Configúralo en la página de Configuración.")
 
-        creds = Credentials.from_service_account_file(
-            settings.GOOGLE_APPLICATION_CREDENTIALS,
-            scopes=SCOPES,
-        )
+        creds = self._get_credentials()
         self._client = gspread.authorize(creds)
-        self._spreadsheet = self._client.open_by_key(settings.GOOGLE_SHEET_ID)
+        self._spreadsheet = self._client.open_by_key(sheet_id)
         return self._spreadsheet
 
     def _get_or_create_monthly_sheet(self, spreadsheet, sheet_name: str):
@@ -157,13 +180,37 @@ class SheetsService:
 
         return new_price_col
 
-    def _get_med_row_map(self, sheet) -> dict:
-        """Lee medicamentos (col B desde DATA_START_ROW) y retorna {nombre_lower: row_idx}."""
-        col_b = sheet.col_values(MED_COL)
+    def _get_med_row_map(self, sheet, all_values: list = None) -> dict:
+        """
+        Lee medicamentos (col B desde DATA_START_ROW) y retorna {nombre_lower: row_idx}.
+        Si se pasa all_values (resultado de get_all_values), lo reutiliza sin llamada extra.
+        En caso de medicamentos repetidos en distintos días, conserva la ÚLTIMA fila.
+        """
+        if all_values is None:
+            col_b = sheet.col_values(MED_COL)
+            med_map = {}
+            for idx, val in enumerate(col_b[DATA_START_ROW - 1:], start=DATA_START_ROW):
+                if val:
+                    med_map[val.lower()] = idx
+            return med_map
+
         med_map = {}
-        for idx, val in enumerate(col_b[DATA_START_ROW - 1:], start=DATA_START_ROW):
-            if val:
-                med_map[val.lower()] = idx
+        for idx, row in enumerate(all_values[DATA_START_ROW - 1:], start=DATA_START_ROW):
+            if len(row) >= MED_COL and row[MED_COL - 1]:
+                med_map[row[MED_COL - 1].lower()] = idx
+        return med_map
+
+    def _get_med_row_map_by_date(self, all_values: list, date_str: str) -> dict:
+        """
+        Retorna {nombre_lower: row_idx} SOLO para filas donde Col A == date_str (hoy).
+        Permite actualizar únicamente el día en curso sin tocar días anteriores.
+        """
+        med_map = {}
+        for idx, row in enumerate(all_values[DATA_START_ROW - 1:], start=DATA_START_ROW):
+            if len(row) >= MED_COL and row[MED_COL - 1]:
+                row_date = row[FECHA_COL - 1] if len(row) >= FECHA_COL else ""
+                if row_date == date_str:
+                    med_map[row[MED_COL - 1].lower()] = idx
         return med_map
 
     def _find_med_key(self, med_row_map: dict, search_key: str) -> str | None:
@@ -207,20 +254,21 @@ class SheetsService:
             logger.info(f"Coincidencia fuzzy: '{search_key}' → '{best_match}' ({best_ratio:.0%})")
         return best_match
 
-    def _mark_best_prices(self, sheet, price_cols: list[int], med_row_map: dict):
-        """Marca en verde el precio más bajo de cada medicamento entre todos los proveedores."""
+    def _mark_best_prices(self, sheet, price_cols: list[int], all_data: list):
+        """
+        Marca en verde el precio más bajo de cada fila de datos entre todos los proveedores.
+        Itera TODAS las filas de datos (incluyendo múltiples días) en lugar de un mapa
+        deduplicado, para que cada día tenga su propio marcado correcto.
+        """
         from gspread.utils import rowcol_to_a1
 
-        if not price_cols or not med_row_map:
+        if not price_cols or not all_data:
             return
 
-        all_data = sheet.get_all_values()
-
-        for med_name, row_idx in med_row_map.items():
-            if row_idx - 1 >= len(all_data):
+        for idx, row in enumerate(all_data[DATA_START_ROW - 1:], start=DATA_START_ROW):
+            if len(row) < MED_COL or not row[MED_COL - 1]:
                 continue
 
-            row = all_data[row_idx - 1]
             prices = []
             for col in price_cols:
                 if col - 1 < len(row):
@@ -228,7 +276,6 @@ class SheetsService:
                         val_str = str(row[col - 1]).strip()
                         if not val_str:
                             continue
-                        # Limpiar formato: quitar comas (miles) y puntos finales
                         val_str = val_str.replace(',', '').rstrip('.')
                         val = float(val_str)
                         if val > 0:
@@ -237,10 +284,9 @@ class SheetsService:
                         pass
 
             if len(prices) < 2:
-                # Sin comparación posible: limpiar cualquier verde previo
                 for col, _ in prices:
                     try:
-                        sheet.format(rowcol_to_a1(row_idx, col), NO_STYLE)
+                        sheet.format(rowcol_to_a1(idx, col), NO_STYLE)
                     except Exception:
                         pass
                 continue
@@ -248,7 +294,7 @@ class SheetsService:
             min_price = min(v for _, v in prices)
 
             for col, val in prices:
-                cell = rowcol_to_a1(row_idx, col)
+                cell = rowcol_to_a1(idx, col)
                 style = GREEN_STYLE if val == min_price else NO_STYLE
                 try:
                     sheet.format(cell, style)
@@ -288,12 +334,19 @@ class SheetsService:
             provider_unit_col = provider_price_col + 1
             is_new_provider = provider_price_col not in existing_price_cols
 
-            med_row_map = self._get_med_row_map(sheet)
+            # Obtener todos los datos una sola vez para minimizar llamadas a la API
+            all_current_data = sheet.get_all_values()
 
-            # Si el proveedor es nuevo, llenar filas existentes con "NO" en Precio y Cantidad
-            if is_new_provider and med_row_map:
+            # Mapa de TODOS los medicamentos en la hoja (cualquier fecha) — para validar
+            all_med_map = self._get_med_row_map(sheet, all_current_data)
+
+            # Mapa SOLO de los medicamentos de HOY — solo estos se actualizan
+            today_med_map = self._get_med_row_map_by_date(all_current_data, date_str)
+
+            # Si el proveedor es nuevo, llenar con "NO" solo las filas de HOY
+            if is_new_provider and today_med_map:
                 no_updates = []
-                for _, row_idx in med_row_map.items():
+                for _, row_idx in today_med_map.items():
                     no_updates.append({
                         "range": rowcol_to_a1(row_idx, provider_price_col),
                         "values": [["NO"]],
@@ -305,10 +358,8 @@ class SheetsService:
                 if no_updates:
                     sheet.batch_update(no_updates)
 
-            next_available_row = (max(med_row_map.values()) + 1) if med_row_map else DATA_START_ROW
-
-            # Leer datos actuales para no sobreescribir precios existentes
-            all_current_data = sheet.get_all_values()
+            # Siguiente fila disponible = después de todos los datos existentes
+            next_available_row = (max(all_med_map.values()) + 1) if all_med_map else DATA_START_ROW
 
             batch_updates = []
             updated_keys = set()
@@ -322,61 +373,38 @@ class SheetsService:
                     continue
 
                 key = med_name.lower()
-                matched_key = self._find_med_key(med_row_map, key)
-                updated_keys.add(matched_key if matched_key else key)
+
+                # 1. Buscar en las filas de HOY primero
+                matched_key = self._find_med_key(today_med_map, key)
 
                 if matched_key is None:
-                    # Fila nueva: escribir Fecha en col A, Medicamento en col B
-                    batch_updates.append({
-                        "range": rowcol_to_a1(next_available_row, FECHA_COL),
-                        "values": [[date_str]],
-                    })
-                    batch_updates.append({
-                        "range": rowcol_to_a1(next_available_row, MED_COL),
-                        "values": [[med_name]],
-                    })
-                    batch_updates.append({
-                        "range": rowcol_to_a1(next_available_row, provider_price_col),
-                        "values": [[price_val]],
-                    })
-                    # Siempre escribir Cantidad (unidad o "NO" si no hay)
-                    batch_updates.append({
-                        "range": rowcol_to_a1(next_available_row, provider_unit_col),
-                        "values": [[unit_val if unit_val else "NO"]],
-                    })
-                    # Llenar otros proveedores existentes con "NO"
-                    for other_col in existing_price_cols:
-                        if other_col != provider_price_col:
-                            batch_updates.append({
-                                "range": rowcol_to_a1(next_available_row, other_col),
-                                "values": [["NO"]],
-                            })
-                            batch_updates.append({
-                                "range": rowcol_to_a1(next_available_row, other_col + 1),
-                                "values": [["NO"]],
-                            })
-                    med_row_map[key] = next_available_row
-                    next_available_row += 1
-                else:
-                    row_idx = med_row_map[matched_key]
-                    # Actualizar fecha y precio
-                    batch_updates.append({
-                        "range": rowcol_to_a1(row_idx, FECHA_COL),
-                        "values": [[date_str]],
-                    })
-                    batch_updates.append({
-                        "range": rowcol_to_a1(row_idx, provider_price_col),
-                        "values": [[price_val]],
-                    })
-                    # Actualizar Cantidad (unidad o "NO" si no hay)
-                    batch_updates.append({
-                        "range": rowcol_to_a1(row_idx, provider_unit_col),
-                        "values": [[unit_val if unit_val else "NO"]],
-                    })
+                    # Medicamento no está en las filas de hoy → ignorar completamente.
+                    # Solo se actualiza lo que el admin ya inicializó para este día.
+                    logger.info(
+                        f"Sheets: '{med_name}' no está en las filas de hoy ({date_str}), se ignora"
+                    )
+                    continue
 
-            # Medicamentos existentes que este proveedor NO ofrece en este mensaje:
-            # poner "NO" en Precio y Cantidad SOLO si la celda está vacía
-            for existing_key, row_idx in med_row_map.items():
+                updated_keys.add(matched_key)
+                row_idx = today_med_map[matched_key]
+
+                # Actualizar precio y cantidad en la fila de hoy
+                batch_updates.append({
+                    "range": rowcol_to_a1(row_idx, FECHA_COL),
+                    "values": [[date_str]],
+                })
+                batch_updates.append({
+                    "range": rowcol_to_a1(row_idx, provider_price_col),
+                    "values": [[price_val]],
+                })
+                batch_updates.append({
+                    "range": rowcol_to_a1(row_idx, provider_unit_col),
+                    "values": [[unit_val if unit_val else "NO"]],
+                })
+
+            # Medicamentos de HOY que este proveedor NO incluyó:
+            # poner "NO" solo si la celda está vacía (no sobreescribir otra respuesta)
+            for existing_key, row_idx in today_med_map.items():
                 if existing_key not in updated_keys and not any(
                     existing_key == uk or set(existing_key.split()).issubset(set(uk.split())) or set(uk.split()).issubset(set(existing_key.split()))
                     for uk in updated_keys
@@ -407,10 +435,11 @@ class SheetsService:
                 except Exception as e:
                     logger.warning(f"No se pudo formatear columna de precios: {e}")
 
-            # Marcar mejor precio en verde — detectar columnas "Precio" en fila 2
-            header_row = sheet.row_values(COL_HEADER_ROW)
+            # Marcar mejor precio en verde — usando todos los datos actualizados
+            updated_all_data = sheet.get_all_values()
+            header_row = updated_all_data[COL_HEADER_ROW - 1] if len(updated_all_data) >= COL_HEADER_ROW else []
             all_price_cols = [i + 1 for i, v in enumerate(header_row) if v == "Precio"]
-            self._mark_best_prices(sheet, all_price_cols, self._get_med_row_map(sheet))
+            self._mark_best_prices(sheet, all_price_cols, updated_all_data)
 
             logger.info(f"Sheets actualizado: hoja '{sheet_name}', '{provider_name}', {len(prices)} precios")
             return self.get_sheet_url()
@@ -419,13 +448,193 @@ class SheetsService:
             logger.error(f"Error actualizando Google Sheets: {e}")
             raise
 
+    def monthly_sheet_exists(self, target_date: date = None) -> bool:
+        """Verifica si ya existe la hoja del mes en Google Sheets."""
+        if not self._get_sheet_id():
+            return False
+        target_date = target_date or date.today()
+        sheet_name = target_date.strftime("%Y-%m")
+        try:
+            spreadsheet = self._get_spreadsheet()
+            all_sheets = [ws.title for ws in spreadsheet.worksheets()]
+            return sheet_name in all_sheets
+        except Exception as e:
+            logger.warning(f"No se pudo verificar hoja en Sheets: {e}")
+            return False
+
+    def create_empty_monthly_sheet(
+        self,
+        provider_names: list[str],
+        target_date: date = None,
+        force: bool = False,
+    ) -> bool:
+        """
+        Crea la hoja del mes en Google Sheets con el formato y los proveedores.
+        Sin medicamentos — se agregan cuando lleguen precios por WhatsApp.
+        Si force=True elimina la hoja existente y la recrea.
+        Retorna True si se creó, False si ya existía (y no se forzó).
+        """
+        if not self._get_sheet_id():
+            logger.info("GOOGLE_SHEET_ID no configurado, se omite creación en Sheets")
+            return False
+
+        target_date = target_date or date.today()
+        sheet_name = target_date.strftime("%Y-%m")
+
+        try:
+            spreadsheet = self._get_spreadsheet()
+            all_sheet_titles = [ws.title for ws in spreadsheet.worksheets()]
+
+            if sheet_name in all_sheet_titles:
+                if not force:
+                    logger.info(f"Hoja Sheets '{sheet_name}' ya existe, no se sobreescribe")
+                    return False
+                # Eliminar la hoja para recrearla limpia
+                existing = spreadsheet.worksheet(sheet_name)
+                spreadsheet.del_worksheet(existing)
+                logger.info(f"Hoja Sheets '{sheet_name}' eliminada para recrear")
+
+            # Crear hoja nueva
+            ws = spreadsheet.add_worksheet(title=sheet_name, rows=500, cols=50)
+
+            # Fila 2: encabezados fijos Fecha y Medicamento
+            ws.update(f"A{COL_HEADER_ROW}:B{COL_HEADER_ROW}", [["Fecha", "Medicamento"]])
+            ws.format(f"A{COL_HEADER_ROW}", COL_HEADER_STYLE)
+            ws.format(f"B{COL_HEADER_ROW}", COL_HEADER_STYLE)
+
+            # Crear columnas de proveedores
+            for prov_name in provider_names:
+                self._get_or_create_provider_col(ws, prov_name)
+
+            logger.info(
+                f"Hoja Sheets '{sheet_name}' creada con {len(provider_names)} proveedor(es)"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Error creando hoja mensual en Sheets: {e}")
+            raise
+
+    def create_day_header(self, target_date: date = None) -> dict:
+        """
+        Inserta el bloque de encabezado del nuevo día en Google Sheets:
+          - Fila vacía de separación
+          - Fila con nombre(s) de proveedor(es) (estilo azul, igual que fila 1)
+          - Fila con Fecha | Medicamento | Precio | Cantidad (estilo azul, igual que fila 2)
+        El dueño agrega los medicamentos y fechas manualmente debajo.
+        Retorna {"created": bool}.
+        """
+        if not self._get_sheet_id():
+            return {"created": False}
+
+        target_date = target_date or date.today()
+        sheet_name = target_date.strftime("%Y-%m")
+
+        try:
+            spreadsheet = self._get_spreadsheet()
+            sheet = self._get_or_create_monthly_sheet(spreadsheet, sheet_name)
+
+            from gspread.utils import rowcol_to_a1
+
+            all_values = sheet.get_all_values()
+
+            # Columnas de proveedores existentes
+            col_headers = all_values[COL_HEADER_ROW - 1] if len(all_values) >= COL_HEADER_ROW else []
+            price_cols = [
+                i + 1 for i, v in enumerate(col_headers)
+                if v == "Precio" and i + 1 >= FIRST_PROVIDER_COL
+            ]
+
+            # Verificar si el encabezado del día ya fue creado:
+            # buscar una fila con "Fecha" en col A después de los encabezados fijos (fila 2)
+            for row in all_values[DATA_START_ROW - 1:]:
+                if len(row) >= FECHA_COL and row[FECHA_COL - 1] == "Fecha":
+                    logger.info("Sheets: encabezado de día ya existe, no se duplica")
+                    return {"created": False}
+
+            all_med_map = self._get_med_row_map(sheet, all_values)
+            # Fila siguiente a todos los datos existentes (+ 1 de separador)
+            next_row = (max(all_med_map.values()) + 2) if all_med_map else DATA_START_ROW
+
+            prov_header_row = next_row
+            col_header_row = next_row + 1
+
+            prov_row_values = all_values[PROVIDER_ROW - 1] if len(all_values) >= PROVIDER_ROW else []
+
+            batch_updates = []
+            last_col = max(price_cols) + 1 if price_cols else MED_COL
+
+            # Fila encabezado de proveedor — igual que fila 1:
+            # el primer proveedor arranca desde col A (FECHA_COL) con merge hasta el final,
+            # los siguientes solo en sus propias columnas.
+            for pc in price_cols:
+                if pc == FIRST_PROVIDER_COL:
+                    # Primer proveedor: nombre en col A (igual que la fila 1 original)
+                    prov_name = prov_row_values[0] if prov_row_values else ""
+                    batch_updates.append({"range": rowcol_to_a1(prov_header_row, FECHA_COL), "values": [[prov_name]]})
+                else:
+                    prov_name = prov_row_values[pc - 1] if pc - 1 < len(prov_row_values) else ""
+                    batch_updates.append({"range": rowcol_to_a1(prov_header_row, pc), "values": [[prov_name]]})
+
+            # Fila sub-encabezados
+            batch_updates.append({"range": rowcol_to_a1(col_header_row, FECHA_COL), "values": [["Fecha"]]})
+            batch_updates.append({"range": rowcol_to_a1(col_header_row, MED_COL), "values": [["Medicamento"]]})
+            for pc in price_cols:
+                batch_updates.append({"range": rowcol_to_a1(col_header_row, pc), "values": [["Precio"]]})
+                batch_updates.append({"range": rowcol_to_a1(col_header_row, pc + 1), "values": [["Cantidad"]]})
+
+            if batch_updates:
+                sheet.batch_update(batch_updates)
+
+            # Estilos — mismo patrón que fila 1 y fila 2 originales:
+            # fila proveedor: merge desde A hasta última col de unidad, estilo azul
+            # fila sub-encabezados: todo desde A hasta última col, estilo azul
+            if price_cols:
+                # Primer proveedor: merge desde col A
+                first_unit_col = FIRST_PROVIDER_COL + 1
+                try:
+                    sheet.merge_cells(
+                        f"{rowcol_to_a1(prov_header_row, FECHA_COL)}:{rowcol_to_a1(prov_header_row, first_unit_col)}"
+                    )
+                except Exception:
+                    pass
+                sheet.format(
+                    f"{rowcol_to_a1(prov_header_row, FECHA_COL)}:{rowcol_to_a1(prov_header_row, first_unit_col)}",
+                    PROVIDER_HEADER_STYLE,
+                )
+                # Proveedores adicionales: cada uno en sus propias cols
+                for pc in price_cols:
+                    if pc != FIRST_PROVIDER_COL:
+                        try:
+                            sheet.merge_cells(
+                                f"{rowcol_to_a1(prov_header_row, pc)}:{rowcol_to_a1(prov_header_row, pc + 1)}"
+                            )
+                        except Exception:
+                            pass
+                        sheet.format(
+                            f"{rowcol_to_a1(prov_header_row, pc)}:{rowcol_to_a1(prov_header_row, pc + 1)}",
+                            PROVIDER_HEADER_STYLE,
+                        )
+                # Sub-encabezados: desde col A hasta última col
+                sheet.format(
+                    f"{rowcol_to_a1(col_header_row, FECHA_COL)}:{rowcol_to_a1(col_header_row, last_col)}",
+                    COL_HEADER_STYLE,
+                )
+
+            logger.info(f"Sheets: encabezado de nuevo día insertado en filas {prov_header_row}-{col_header_row}")
+            return {"created": True}
+
+        except Exception as e:
+            logger.error(f"Error creando encabezado de día en Sheets: {e}")
+            raise
+
     def get_sheet_url(self) -> str:
-        if not settings.GOOGLE_SHEET_ID:
+        if not self._get_sheet_id():
             return ""
-        return f"https://docs.google.com/spreadsheets/d/{settings.GOOGLE_SHEET_ID}"
+        return f"https://docs.google.com/spreadsheets/d/{self._get_sheet_id()}"
 
     def get_summary(self) -> dict:
-        if not settings.GOOGLE_SHEET_ID:
+        if not self._get_sheet_id():
             return {"configured": False}
         try:
             spreadsheet = self._get_spreadsheet()

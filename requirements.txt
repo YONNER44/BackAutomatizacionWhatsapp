@@ -11,6 +11,9 @@ openai==1.66.3
 # Excel
 openpyxl==3.1.5
 
+# Subida de archivos (multipart/form-data)
+python-multipart==0.0.22
+
 # Google Sheets
 gspread==6.1.4
 

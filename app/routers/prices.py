@@ -10,9 +10,13 @@ from app.database.db import get_db
 from app.models.price import Price
 from app.models.provider import Provider
 from app.services.excel import ExcelService
+from app.services.sheets import SheetsService
+from app.config import get_settings
 
 router = APIRouter()
 excel_svc = ExcelService()
+sheets_svc = SheetsService()
+settings = get_settings()
 
 
 class PriceResponse(BaseModel):
@@ -96,6 +100,99 @@ async def delete_price(price_id: int, db: AsyncSession = Depends(get_db)):
     await db.delete(price)
     await db.commit()
     return {"success": True}
+
+
+@router.post("/init-month")
+async def init_monthly_sheet(
+    db: AsyncSession = Depends(get_db),
+    force: bool = Query(default=False, description="Si True, recrea la hoja aunque ya exista"),
+):
+    """
+    Crea la hoja del mes actual en el Excel con el formato y los proveedores activos.
+    Sin medicamentos — se agregan solos cuando lleguen precios por WhatsApp.
+    Si la hoja ya existe y force=False, no hace nada (validación anti-duplicado).
+    Si force=True, elimina y recrea la hoja con el nuevo formato.
+    """
+    current_month = date.today().strftime("%Y-%m")
+
+    # Si Google Sheets está configurado, verificar ahí (es la fuente principal)
+    # Si no, verificar el Excel local
+    if settings.GOOGLE_SHEET_ID:
+        already_exists = sheets_svc.monthly_sheet_exists()
+    else:
+        already_exists = excel_svc.monthly_sheet_exists()
+
+    if already_exists and not force:
+        return {
+            "success": True,
+            "created": False,
+            "sheet": current_month,
+            "message": f"La hoja '{current_month}' ya existe. No se realizó ningún cambio.",
+        }
+
+    providers_result = await db.execute(
+        select(Provider).where(Provider.is_active == True).order_by(Provider.name)
+    )
+    providers = [p.name for p in providers_result.scalars().all()]
+
+    # Crear en Excel local
+    excel_svc.create_empty_monthly_sheet(providers, force=force)
+
+    # Crear en Google Sheets (si está configurado)
+    sheets_error = None
+    if settings.GOOGLE_SHEET_ID:
+        try:
+            sheets_svc.create_empty_monthly_sheet(providers, force=force)
+        except Exception as e:
+            sheets_error = str(e)
+
+    msg = f"Hoja '{current_month}' creada con {len(providers)} proveedor(es)."
+    if sheets_error:
+        msg += f" (Google Sheets: {sheets_error})"
+
+    return {
+        "success": True,
+        "created": True,
+        "sheet": current_month,
+        "providers": len(providers),
+        "message": msg,
+    }
+
+
+@router.post("/init-day")
+async def init_day():
+    """
+    Inserta el bloque de encabezado del nuevo día (Arca software + Fecha/Medicamento/Precio/Cantidad)
+    debajo de los datos existentes en el Excel y Google Sheets.
+    El dueño agrega los medicamentos y fechas manualmente debajo del encabezado.
+    """
+    today = date.today()
+
+    excel_result = excel_svc.create_day_header(today)
+
+    sheets_result = {"created": False}
+    sheets_error = None
+    if settings.GOOGLE_SHEET_ID:
+        try:
+            sheets_result = sheets_svc.create_day_header(today)
+        except Exception as e:
+            sheets_error = str(e)
+
+    created = excel_result["created"] or sheets_result["created"]
+    msg = (
+        f"Encabezado del día {today.strftime('%d/%m/%Y')} creado correctamente."
+        if created
+        else f"El día {today.strftime('%d/%m/%Y')} ya está inicializado."
+    )
+    if sheets_error:
+        msg += f" (Google Sheets: {sheets_error})"
+
+    return {
+        "success": True,
+        "created": created,
+        "date": today.strftime("%d/%m/%Y"),
+        "message": msg,
+    }
 
 
 @router.get("/export/excel")

@@ -2,13 +2,20 @@
 
 Este servicio captura mensajes de WhatsApp usando `whatsapp-web.js` y los envía al backend Python.
 
-## 🚀 Instalación
+## Tecnologías
+
+- **Node.js 20**
+- **whatsapp-web.js** – automatización de WhatsApp Web
+- **Puppeteer** – control de Chromium headless
+- **Express** – servidor HTTP para endpoints de monitoreo y QR
+
+## Instalación (desarrollo local)
 
 ```bash
 npm install
 ```
 
-## ⚙️ Configuración
+## Configuración
 
 1. Copia el archivo de ejemplo:
 ```bash
@@ -22,7 +29,7 @@ BACKEND_URL=http://localhost:8000
 DEBUG=true
 ```
 
-## ▶️ Correr el servicio
+## Correr el servicio
 
 ```bash
 # Producción
@@ -32,35 +39,60 @@ npm start
 npm run dev
 ```
 
-## 📱 Vincular WhatsApp
+## Despliegue con Docker
+
+El servicio corre dentro de un contenedor Docker usando Chromium del sistema (no descarga Chrome por separado):
+
+```bash
+# Desde la raíz del proyecto
+docker compose up --build -d whatsapp
+```
+
+Variables de entorno relevantes en Docker:
+- `PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true` – no descarga Chrome, usa el del sistema
+- `PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium` – ruta de Chromium en la imagen
+
+La sesión de WhatsApp se persiste en el volumen `whatsapp_session` para que no pida QR en cada reinicio.
+
+## Vincular WhatsApp
 
 1. Al iniciar el servicio, aparecerá un **código QR** en la terminal
 2. Abre WhatsApp en tu celular
 3. Ve a: **Configuración > Dispositivos vinculados > Vincular dispositivo**
 4. Escanea el código QR
-5. ¡Listo! El servicio está conectado
+5. El QR también está disponible visualmente en: `http://localhost:3000/qr-viewer`
 
-## 🔄 Funcionamiento
+> La sesión se guarda en `./session-data`. No la borres o tendrás que escanear el QR nuevamente.
 
-Cuando recibas mensajes de WhatsApp:
-1. El servicio los captura automáticamente
-2. Los envía al backend Python (`http://localhost:8000/api/webhook/whatsapp-web`)
-3. El backend procesa OCR (si es imagen) + IA
-4. Actualiza automáticamente Excel/Google Sheets
+## Funcionamiento
 
-## 📊 Endpoints de monitoreo
+Cuando llega un mensaje de WhatsApp:
+1. El servicio lo captura automáticamente
+2. Si tiene media (imagen), la descarga en base64
+3. Resuelve números con formato `@lid` al número real (`@c.us`)
+4. Envía todo al backend Python: `POST /api/webhook/whatsapp-web`
+5. El backend extrae texto (OCR si es imagen), la IA parsea precios y actualiza Google Sheets/Excel
 
-- **Status**: `http://localhost:3000/status` - Estado de conexión (connected/disconnected) y timestamp
-- **Health**: `http://localhost:3000/health` - Verificar si el servicio está corriendo
-- **QR (JSON)**: `http://localhost:3000/qr` - Obtener el código QR en formato JSON
-- **QR (visual)**: `http://localhost:3000/qr-viewer` - Ver el código QR en el navegador
+## Reinicio automático
 
-## 🛑 Detener el servicio
+El servicio se reinicia solo ante cualquier desconexión (`disconnected`, `auth_failure`, errores no capturados). No requiere intervención manual. Espera 5–8 segundos y reconecta.
 
-Presiona `Ctrl + C` en la terminal
+## Endpoints de monitoreo
 
-## 📝 Notas
+| Endpoint | Descripción |
+|----------|-------------|
+| `GET /status` | Estado de conexión (`connected`/`disconnected`), QR actual y timestamp |
+| `GET /health` | Health check básico |
+| `GET /qr` | Código QR en JSON (para integraciones) |
+| `GET /qr-viewer` | Página HTML para escanear el QR visualmente |
 
-- La sesión se guarda en `./session-data` - no la borres o tendrás que escanear el QR nuevamente
+## Detener el servicio
+
+Presiona `Ctrl + C` — el servicio cierra la sesión de WhatsApp limpiamente antes de salir.
+
+## Notas
+
 - Soporta mensajes de texto e imágenes
-- Los mensajes se procesan en segundo plano
+- Variable `DEBUG=true` en `.env` muestra logs detallados de cada mensaje recibido
+- El payload enviado al backend incluye: `from`, `timestamp`, `messageId`, `type`, `body`, `hasMedia`, y opcionalmente `media` (base64)
+- En Docker, Chromium corre con `--no-sandbox` ya que está dentro de un contenedor sin privilegios de root

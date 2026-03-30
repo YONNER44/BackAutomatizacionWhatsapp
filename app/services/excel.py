@@ -56,23 +56,30 @@ class ExcelService:
         return ws
 
     def _mark_best_prices(self, ws, first_provider_col: int):
-        """Marca en verde el precio más bajo de cada fila (medicamento)."""
-        for row in range(2, ws.max_row + 1):
+        """
+        Marca en verde el precio más bajo de cada fila de datos.
+        Itera TODAS las filas (incluyendo múltiples días) — cada fila se evalúa
+        independientemente para que cada día tenga su propio marcado correcto.
+        """
+        for row in range(3, ws.max_row + 1):
             if not ws.cell(row, 2).value:  # Col B = Medicamento
                 continue
 
             prices = []
-            for col in range(first_provider_col, ws.max_column + 1):
+            col = first_provider_col
+            while col <= ws.max_column:
                 val = ws.cell(row, col).value
                 if isinstance(val, (int, float)):
                     prices.append((col, val))
+                col += 2  # Saltar columna de cantidad
 
             if len(prices) < 2:
-                continue  # Sin comparación posible con un solo proveedor
+                continue
 
             min_price = min(v for _, v in prices)
 
-            for col in range(first_provider_col, ws.max_column + 1):
+            col = first_provider_col
+            while col <= ws.max_column:
                 cell = ws.cell(row, col)
                 if isinstance(cell.value, (int, float)) and cell.value == min_price:
                     cell.fill = GREEN_FILL
@@ -80,55 +87,90 @@ class ExcelService:
                 else:
                     cell.fill = NO_FILL
                     cell.font = NORMAL_FONT
+                col += 2
 
     def update_prices(self, provider_name: str, prices: list[dict], report_date: date = None) -> str:
         """
         Actualiza el archivo Excel con los precios del proveedor.
-        - Una hoja por mes: "YYYY-MM" (ej: "2026-03")
-        - Medicamentos en filas (columna A)
-        - Proveedores en columnas (B en adelante)
-        - El precio más bajo de cada fila se marca en verde automáticamente
+        Formato: Fila 1 = proveedor (fusionado Precio+Cantidad), Fila 2 = encabezados,
+                 Fila 3+ = datos. Col A=Fecha, B=Medicamento, C/D=Prov1, E/F=Prov2, ...
         """
         if not prices:
             logger.info(f"No hay precios para actualizar de proveedor: {provider_name}")
             return str(self.output_path)
 
         report_date = report_date or date.today()
-        sheet_name = report_date.strftime("%Y-%m")  # ej: "2026-03"
+        sheet_name = report_date.strftime("%Y-%m")
 
         wb = self._get_or_create_workbook()
-        ws = self._get_or_create_monthly_sheet(wb, sheet_name)
 
-        # Encontrar o crear columna del proveedor (empieza en col D=4)
-        # Col A=Fecha, Col B=Medicamento, Col C=Cantidad, Col D+=Proveedores
-        provider_col = None
-        first_provider_col = 4
-        for col in range(first_provider_col, ws.max_column + 2):
+        # Obtener o crear hoja en el nuevo formato
+        if sheet_name not in wb.sheetnames:
+            ws = wb.create_sheet(title=sheet_name)
+            ws.cell(2, 1, "Fecha")
+            self._apply_header_style(ws.cell(2, 1))
+            ws.cell(2, 2, "Medicamento")
+            self._apply_header_style(ws.cell(2, 2))
+            ws.column_dimensions["A"].width = 13
+            ws.column_dimensions["B"].width = 36
+        else:
+            ws = wb[sheet_name]
+
+        # Buscar o crear las columnas del proveedor
+        # Fila 1: nombre proveedor en cols impares (3, 5, 7...), paso de 2 en 2
+        first_provider_col = 3
+        provider_price_col = None
+        col = first_provider_col
+        while True:
             cell_val = ws.cell(1, col).value
             if cell_val == provider_name:
-                provider_col = col
+                provider_price_col = col
                 break
             if cell_val is None:
-                provider_col = col
-                ws.cell(1, col, provider_name)
-                self._apply_header_style(ws.cell(1, col))
-                ws.column_dimensions[get_column_letter(col)].width = 20
+                # Nueva columna de proveedor
+                provider_price_col = col
+                unit_col = col + 1
+                prov_cell = ws.cell(1, col, provider_name)
+                self._apply_header_style(prov_cell)
+                ws.merge_cells(
+                    start_row=1, start_column=col,
+                    end_row=1, end_column=unit_col,
+                )
+                ws.cell(2, col, "Precio")
+                self._apply_header_style(ws.cell(2, col))
+                ws.cell(2, unit_col, "Cantidad")
+                self._apply_header_style(ws.cell(2, unit_col))
+                ws.column_dimensions[get_column_letter(col)].width = 16
+                ws.column_dimensions[get_column_letter(unit_col)].width = 14
                 break
+            col += 2
 
-        # Índice de medicamentos existentes (col B = Medicamento)
-        med_rows = {}
-        for row in range(2, ws.max_row + 1):
+        provider_unit_col = provider_price_col + 1
+
+        date_str = report_date.strftime("%d/%m/%Y")
+
+        # Todos los medicamentos (cualquier fecha) — para validación y posición final
+        all_med_rows = {}
+        for row in range(3, ws.max_row + 1):
             val = ws.cell(row, 2).value
             if val and isinstance(val, str):
-                med_rows[val.lower()] = row
+                all_med_rows[val.lower()] = row
 
-        def find_med_key(search_key: str) -> str | None:
+        # Solo medicamentos de HOY — únicamente estas filas se actualizan
+        today_med_rows = {}
+        for row in range(3, ws.max_row + 1):
+            fecha_val = ws.cell(row, 1).value
+            med_val = ws.cell(row, 2).value
+            if med_val and isinstance(med_val, str) and fecha_val == date_str:
+                today_med_rows[med_val.lower()] = row
+
+        def find_med_key(search_key: str, source: dict) -> str | None:
             from difflib import SequenceMatcher
-            if search_key in med_rows:
+            if search_key in source:
                 return search_key
             search_words = set(search_key.split())
             best_word, best_overlap = None, 0
-            for k in med_rows:
+            for k in source:
                 kw = set(k.split())
                 if search_words.issubset(kw) or kw.issubset(search_words):
                     overlap = len(search_words & kw)
@@ -137,55 +179,53 @@ class ExcelService:
             if best_word:
                 return best_word
             best_fuzzy, best_ratio = None, 0.0
-            for k in med_rows:
+            for k in source:
                 r = SequenceMatcher(None, search_key, k).ratio()
                 if r >= 0.80 and r > best_ratio:
                     best_ratio, best_fuzzy = r, k
             return best_fuzzy
 
-        # Próxima fila disponible
-        next_available_row = (max(med_rows.values()) + 1) if med_rows else 2
+        # Siguiente fila disponible = después de todos los datos existentes
+        next_available_row = (max(all_med_rows.values()) + 1) if all_med_rows else 3
 
-        # Insertar/actualizar precios
         for item in prices:
             med_name = item.get("medication_name", "").strip()
             price_val = item.get("price")
-            unit = item.get("unit") or ""
+            unit = item.get("unit") or "NO"
 
             if not med_name or price_val is None:
                 continue
 
             key = med_name.lower()
-            matched_key = find_med_key(key)
+
+            # 1. Buscar en las filas de HOY
+            matched_key = find_med_key(key, today_med_rows)
 
             if matched_key is None:
-                # Col A: Fecha, Col B: Medicamento, Col C: Cantidad
-                date_cell = ws.cell(next_available_row, 1, report_date.strftime("%d/%m/%Y"))
-                self._apply_border(date_cell)
-                ws.cell(next_available_row, 2, med_name)
-                self._apply_border(ws.cell(next_available_row, 2))
-                if unit:
-                    ws.cell(next_available_row, 3, unit)
-                    self._apply_border(ws.cell(next_available_row, 3))
-                med_rows[key] = next_available_row
-                next_available_row += 1
-            else:
-                # Actualizar fecha y cantidad si es necesario
-                date_cell = ws.cell(med_rows[matched_key], 1, report_date.strftime("%d/%m/%Y"))
-                self._apply_border(date_cell)
-                if unit:
-                    ws.cell(med_rows[matched_key], 3, unit)
+                # Medicamento no está en las filas de hoy → ignorar completamente.
+                # Solo se actualiza lo que el admin ya inicializó para este día.
+                logger.info(f"Excel: '{med_name}' no está en las filas de hoy ({date_str}), se ignora")
+                continue
 
-            row_idx = med_rows[matched_key]
-            price_cell = ws.cell(row_idx, provider_col, price_val)
+            row_idx = today_med_rows[matched_key]
+            # Actualizar fecha
+            ws.cell(row_idx, 1, date_str)
+            self._apply_border(ws.cell(row_idx, 1))
+            # Precio del proveedor
+            price_cell = ws.cell(row_idx, provider_price_col, price_val)
             price_cell.number_format = "#,##0.00"
             self._apply_border(price_cell)
+            # Cantidad del proveedor
+            unit_cell = ws.cell(row_idx, provider_unit_col, unit)
+            self._apply_border(unit_cell)
 
-        # Marcar mejor precio en verde (proveedores desde col 4)
+        # Marcar mejor precio en verde
         self._mark_best_prices(ws, first_provider_col)
 
         wb.save(self.output_path)
-        logger.info(f"Excel actualizado: hoja '{sheet_name}', proveedor '{provider_name}', {len(prices)} precios")
+        logger.info(
+            f"Excel actualizado: hoja '{sheet_name}', proveedor '{provider_name}', {len(prices)} precios"
+        )
         return str(self.output_path)
 
     def generate_report(self, prices_data: list[dict]) -> bytes:
@@ -301,6 +341,160 @@ class ExcelService:
         wb.save(output)
         output.seek(0)
         return output.getvalue()
+
+    def create_empty_monthly_sheet(
+        self,
+        provider_names: list[str],
+        target_date: date = None,
+        force: bool = False,
+    ) -> bool:
+        """
+        Crea la hoja del mes solo con el formato (encabezados y columnas de proveedores).
+        Sin medicamentos — se agregan solos cuando los proveedores envían precios.
+        Si force=True elimina la hoja existente y la recrea.
+        Retorna True si se creó, False si ya existía (y no se forzó).
+        """
+        target_date = target_date or date.today()
+        sheet_name = target_date.strftime("%Y-%m")
+
+        wb = self._get_or_create_workbook()
+
+        if sheet_name in wb.sheetnames:
+            if not force:
+                logger.info(f"Hoja '{sheet_name}' ya existe, no se sobreescribe")
+                return False
+            # Eliminar la hoja existente para recrearla limpia
+            del wb[sheet_name]
+            logger.info(f"Hoja '{sheet_name}' eliminada para recrear con nuevo formato")
+
+        ws = wb.create_sheet(title=sheet_name)
+
+        # Fila 2: encabezados fijos
+        ws.cell(2, 1, "Fecha")
+        self._apply_header_style(ws.cell(2, 1))
+        ws.cell(2, 2, "Medicamento")
+        self._apply_header_style(ws.cell(2, 2))
+        ws.column_dimensions["A"].width = 13
+        ws.column_dimensions["B"].width = 36
+
+        # Proveedores: 2 columnas cada uno (Precio + Cantidad) a partir de col C (col 3)
+        for i, prov_name in enumerate(provider_names):
+            price_col = 3 + i * 2
+            unit_col = price_col + 1
+
+            prov_cell = ws.cell(1, price_col, prov_name)
+            self._apply_header_style(prov_cell)
+            ws.merge_cells(
+                start_row=1, start_column=price_col,
+                end_row=1, end_column=unit_col,
+            )
+            ws.cell(2, price_col, "Precio")
+            self._apply_header_style(ws.cell(2, price_col))
+            ws.cell(2, unit_col, "Cantidad")
+            self._apply_header_style(ws.cell(2, unit_col))
+            ws.column_dimensions[get_column_letter(price_col)].width = 16
+            ws.column_dimensions[get_column_letter(unit_col)].width = 14
+
+        wb.save(self.output_path)
+        logger.info(
+            f"Hoja '{sheet_name}' creada con formato para {len(provider_names)} proveedor(es)"
+        )
+        return True
+
+    def create_day_header(self, target_date: date = None) -> dict:
+        """
+        Inserta el bloque de encabezado del nuevo día en el Excel local:
+          - Fila vacía de separación
+          - Fila con nombre(s) de proveedor(es) (estilo azul, igual que fila 1)
+          - Fila con Fecha | Medicamento | Precio | Cantidad (estilo azul, igual que fila 2)
+        El dueño agrega los medicamentos y fechas manualmente debajo.
+        Retorna {"created": bool}.
+        """
+        target_date = target_date or date.today()
+        sheet_name = target_date.strftime("%Y-%m")
+
+        wb = self._get_or_create_workbook()
+        if sheet_name not in wb.sheetnames:
+            logger.info(f"Excel: hoja '{sheet_name}' no existe, no se puede inicializar día")
+            return {"created": False}
+
+        ws = wb[sheet_name]
+
+        # Verificar si el encabezado del día ya fue creado:
+        # buscar una fila con "Fecha" en col A después de los encabezados fijos (fila 2)
+        for row in range(3, ws.max_row + 1):
+            if ws.cell(row, 1).value == "Fecha":
+                logger.info(f"Excel: encabezado de día ya existe en fila {row}, no se duplica")
+                return {"created": False}
+
+        # Columnas de proveedores (fila 1, col 3 en adelante de 2 en 2)
+        price_cols = []
+        col = 3
+        while col <= ws.max_column:
+            if ws.cell(1, col).value:
+                price_cols.append(col)
+            col += 2
+
+        # Última fila con datos en col B
+        last_data_row = 2
+        for row in range(3, ws.max_row + 1):
+            if ws.cell(row, 2).value:
+                last_data_row = row
+
+        # Fila separadora vacía + encabezado de proveedor + sub-encabezados
+        prov_header_row = last_data_row + 2
+        col_header_row = prov_header_row + 1
+
+        for pc in price_cols:
+            uc = pc + 1
+            prov_name = ws.cell(1, pc).value or ""
+            if pc == 3:
+                # Primer proveedor: igual que fila 1 original — arranca desde col A con merge completo
+                prov_cell = ws.cell(prov_header_row, 1, prov_name)
+                self._apply_header_style(prov_cell)
+                try:
+                    ws.merge_cells(
+                        start_row=prov_header_row, start_column=1,
+                        end_row=prov_header_row, end_column=uc,
+                    )
+                except Exception:
+                    pass
+            else:
+                prov_cell = ws.cell(prov_header_row, pc, prov_name)
+                self._apply_header_style(prov_cell)
+                try:
+                    ws.merge_cells(
+                        start_row=prov_header_row, start_column=pc,
+                        end_row=prov_header_row, end_column=uc,
+                    )
+                except Exception:
+                    pass
+
+        ws.cell(col_header_row, 1, "Fecha")
+        self._apply_header_style(ws.cell(col_header_row, 1))
+        ws.cell(col_header_row, 2, "Medicamento")
+        self._apply_header_style(ws.cell(col_header_row, 2))
+        for pc in price_cols:
+            ws.cell(col_header_row, pc, "Precio")
+            self._apply_header_style(ws.cell(col_header_row, pc))
+            ws.cell(col_header_row, pc + 1, "Cantidad")
+            self._apply_header_style(ws.cell(col_header_row, pc + 1))
+
+        wb.save(self.output_path)
+        logger.info(f"Excel: encabezado de nuevo día insertado en filas {prov_header_row}-{col_header_row}")
+        return {"created": True}
+
+    def monthly_sheet_exists(self, target_date: date = None) -> bool:
+        """Verifica si ya existe la hoja del mes indicado."""
+        target_date = target_date or date.today()
+        sheet_name = target_date.strftime("%Y-%m")
+        if not self.output_path.exists():
+            return False
+        from openpyxl import load_workbook
+        wb = load_workbook(self.output_path, read_only=True)
+        exists = sheet_name in wb.sheetnames
+        wb.close()
+        return exists
 
     def get_summary(self) -> dict:
         if not self.output_path.exists():

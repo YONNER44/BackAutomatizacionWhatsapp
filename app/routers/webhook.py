@@ -133,8 +133,42 @@ async def process_message(message_id: int, msg_data: dict, provider: Provider):
             prices_data = await ai_parser_svc.parse_prices(text_to_parse)
 
             today = date.today()
+
+            # Filtrar: solo medicamentos que ya están en las filas de HOY.
+            # Si el proveedor respondió tarde (mensaje de ayer), solo se procesan
+            # los medicamentos que el admin ya inicializó para hoy.
+            if settings.GOOGLE_SHEET_ID and prices_data:
+                try:
+                    import gspread as _gspread
+                    sheet_name = today.strftime("%Y-%m")
+                    date_str = today.strftime("%d/%m/%Y")
+                    _spreadsheet = sheets_svc._get_spreadsheet()
+                    _sheet = _spreadsheet.worksheet(sheet_name)
+                    _all_values = _sheet.get_all_values()
+                    _today_map = sheets_svc._get_med_row_map_by_date(_all_values, date_str)
+                    filtered = []
+                    for item in prices_data:
+                        key = item["medication_name"].lower()
+                        if sheets_svc._find_med_key(_today_map, key) is not None:
+                            filtered.append(item)
+                        else:
+                            logger.info(
+                                f"Medicamento ignorado (no está en filas de hoy '{date_str}'): "
+                                f"'{item['medication_name']}'"
+                            )
+                    prices_data = filtered
+                except _gspread.WorksheetNotFound:
+                    logger.warning(
+                        f"Hoja '{sheet_name}' no encontrada en Sheets, "
+                        "se omiten todos los precios"
+                    )
+                    prices_data = []
+                except Exception as _e:
+                    logger.warning(f"No se pudo filtrar por filas de hoy: {_e}")
+
             for item in prices_data:
                 med_name = item["medication_name"]
+
                 existing_result = await db.execute(
                     select(Price).where(
                         Price.provider_id == provider.id,
@@ -163,7 +197,7 @@ async def process_message(message_id: int, msg_data: dict, provider: Provider):
                 try:
                     sheets_svc.update_prices(provider.name, prices_data, today)
                 except Exception as sheets_err:
-                    logger.warning(f"Google Sheets no se actualizó: {sheets_err}")
+                    logger.warning(f"Google Sheets no se actualizo: {sheets_err}")
 
             message.status = MessageStatus.PROCESSED
             message.processed_at = datetime.utcnow()

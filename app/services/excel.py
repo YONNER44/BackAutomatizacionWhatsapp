@@ -39,20 +39,10 @@ class ExcelService:
         cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
     def _get_or_create_monthly_sheet(self, wb, sheet_name: str):
-        """Obtiene o crea la hoja del mes actual."""
+        """Obtiene o crea la hoja del mes actual. Se crea vacía sin formato."""
         if sheet_name in wb.sheetnames:
             return wb[sheet_name]
         ws = wb.create_sheet(title=sheet_name)
-        # Col A: Fecha, Col B: Medicamento, Col C: Cantidad, Col D+: Proveedores
-        ws.cell(1, 1, "Fecha")
-        self._apply_header_style(ws.cell(1, 1))
-        ws.cell(1, 2, "Medicamento")
-        self._apply_header_style(ws.cell(1, 2))
-        ws.cell(1, 3, "Cantidad")
-        self._apply_header_style(ws.cell(1, 3))
-        ws.column_dimensions["A"].width = 12
-        ws.column_dimensions["B"].width = 35
-        ws.column_dimensions["C"].width = 15
         return ws
 
     def _mark_best_prices(self, ws, first_provider_col: int):
@@ -349,9 +339,9 @@ class ExcelService:
         force: bool = False,
     ) -> bool:
         """
-        Crea la hoja del mes solo con el formato (encabezados y columnas de proveedores).
-        Sin medicamentos — se agregan solos cuando los proveedores envían precios.
-        Si force=True elimina la hoja existente y la recrea.
+        Crea la hoja del mes como pestaña vacía (sin formato ni encabezados).
+        El formato se aplica cuando el usuario pulsa "Inicializar día".
+        Si force=True elimina la hoja existente y la recrea vacía.
         Retorna True si se creó, False si ya existía (y no se forzó).
         """
         target_date = target_date or date.today()
@@ -363,51 +353,22 @@ class ExcelService:
             if not force:
                 logger.info(f"Hoja '{sheet_name}' ya existe, no se sobreescribe")
                 return False
-            # Eliminar la hoja existente para recrearla limpia
             del wb[sheet_name]
-            logger.info(f"Hoja '{sheet_name}' eliminada para recrear con nuevo formato")
+            logger.info(f"Hoja '{sheet_name}' eliminada para recrear")
 
-        ws = wb.create_sheet(title=sheet_name)
-
-        # Fila 2: encabezados fijos
-        ws.cell(2, 1, "Fecha")
-        self._apply_header_style(ws.cell(2, 1))
-        ws.cell(2, 2, "Medicamento")
-        self._apply_header_style(ws.cell(2, 2))
-        ws.column_dimensions["A"].width = 13
-        ws.column_dimensions["B"].width = 36
-
-        # Proveedores: 2 columnas cada uno (Precio + Cantidad) a partir de col C (col 3)
-        for i, prov_name in enumerate(provider_names):
-            price_col = 3 + i * 2
-            unit_col = price_col + 1
-
-            prov_cell = ws.cell(1, price_col, prov_name)
-            self._apply_header_style(prov_cell)
-            ws.merge_cells(
-                start_row=1, start_column=price_col,
-                end_row=1, end_column=unit_col,
-            )
-            ws.cell(2, price_col, "Precio")
-            self._apply_header_style(ws.cell(2, price_col))
-            ws.cell(2, unit_col, "Cantidad")
-            self._apply_header_style(ws.cell(2, unit_col))
-            ws.column_dimensions[get_column_letter(price_col)].width = 16
-            ws.column_dimensions[get_column_letter(unit_col)].width = 14
-
+        wb.create_sheet(title=sheet_name)
         wb.save(self.output_path)
-        logger.info(
-            f"Hoja '{sheet_name}' creada con formato para {len(provider_names)} proveedor(es)"
-        )
+        logger.info(f"Hoja '{sheet_name}' creada (vacía, sin formato)")
         return True
 
-    def create_day_header(self, target_date: date = None) -> dict:
+    def create_day_header(
+        self, target_date: date = None, provider_names: list[str] | None = None
+    ) -> dict:
         """
-        Inserta el bloque de encabezado del nuevo día en el Excel local:
-          - Fila vacía de separación
-          - Fila con nombre(s) de proveedor(es) (estilo azul, igual que fila 1)
-          - Fila con Fecha | Medicamento | Precio | Cantidad (estilo azul, igual que fila 2)
-        El dueño agrega los medicamentos y fechas manualmente debajo.
+        Inserta el bloque de encabezado del nuevo día en el Excel local.
+        Si la hoja está vacía (primer día del mes), crea la estructura completa
+        (filas 1-2 con proveedores y sub-encabezados) usando provider_names.
+        Para días posteriores añade un nuevo bloque debajo de los datos existentes.
         Retorna {"created": bool}.
         """
         target_date = target_date or date.today()
@@ -415,33 +376,68 @@ class ExcelService:
 
         wb = self._get_or_create_workbook()
         if sheet_name not in wb.sheetnames:
-            logger.info(f"Excel: hoja '{sheet_name}' no existe, no se puede inicializar día")
-            return {"created": False}
+            wb.create_sheet(title=sheet_name)
 
         ws = wb[sheet_name]
+        date_str = target_date.strftime("%d/%m/%Y")
+        MARKER_COL = 26  # Columna Z — invisible para el usuario
 
-        # Verificar si el encabezado del día ya fue creado:
-        # buscar una fila con "Fecha" en col A después de los encabezados fijos (fila 2)
-        for row in range(3, ws.max_row + 1):
-            if ws.cell(row, 1).value == "Fecha":
-                logger.info(f"Excel: encabezado de día ya existe en fila {row}, no se duplica")
+        # Buscar marcador desde fila 2 para cubrir también el primer día
+        for row in range(2, ws.max_row + 1):
+            val = ws.cell(row, MARKER_COL).value
+            if val == date_str:
+                logger.info(f"Excel: encabezado del día '{date_str}' ya existe en fila {row}, no se duplica")
                 return {"created": False}
 
-        # Columnas de proveedores (fila 1, col 3 en adelante de 2 en 2)
+        # Detectar si la hoja está vacía (sin proveedores en fila 1)
         price_cols = []
         col = 3
         while col <= ws.max_column:
             if ws.cell(1, col).value:
                 price_cols.append(col)
             col += 2
+        is_blank = not price_cols
 
-        # Última fila con datos en col B
+        if is_blank:
+            # Primer día del mes: crear estructura inicial (filas 1-2) con los proveedores
+            if not provider_names:
+                logger.warning("Excel: hoja vacía pero no se proporcionaron proveedores")
+                return {"created": False}
+
+            ws.cell(2, 1, "Fecha")
+            self._apply_header_style(ws.cell(2, 1))
+            ws.cell(2, 2, "Medicamento")
+            self._apply_header_style(ws.cell(2, 2))
+            ws.column_dimensions["A"].width = 13
+            ws.column_dimensions["B"].width = 36
+
+            for i, prov_name in enumerate(provider_names):
+                price_col = 3 + i * 2
+                unit_col = price_col + 1
+                prov_cell = ws.cell(1, price_col, prov_name)
+                self._apply_header_style(prov_cell)
+                ws.merge_cells(start_row=1, start_column=price_col, end_row=1, end_column=unit_col)
+                ws.cell(2, price_col, "Precio")
+                self._apply_header_style(ws.cell(2, price_col))
+                ws.cell(2, unit_col, "Cantidad")
+                self._apply_header_style(ws.cell(2, unit_col))
+                ws.column_dimensions[get_column_letter(price_col)].width = 16
+                ws.column_dimensions[get_column_letter(unit_col)].width = 14
+
+            # Marcador en col Z de fila 2
+            ws.cell(2, MARKER_COL, date_str)
+            wb.save(self.output_path)
+            logger.info(
+                f"Excel: estructura inicial del mes creada con {len(provider_names)} proveedor(es)"
+            )
+            return {"created": True}
+
+        # Día posterior: añadir nuevo bloque debajo de los datos existentes
         last_data_row = 2
         for row in range(3, ws.max_row + 1):
-            if ws.cell(row, 2).value:
+            if ws.cell(row, 1).value or ws.cell(row, 2).value:
                 last_data_row = row
 
-        # Fila separadora vacía + encabezado de proveedor + sub-encabezados
         prov_header_row = last_data_row + 2
         col_header_row = prov_header_row + 1
 
@@ -449,7 +445,6 @@ class ExcelService:
             uc = pc + 1
             prov_name = ws.cell(1, pc).value or ""
             if pc == 3:
-                # Primer proveedor: igual que fila 1 original — arranca desde col A con merge completo
                 prov_cell = ws.cell(prov_header_row, 1, prov_name)
                 self._apply_header_style(prov_cell)
                 try:
@@ -470,6 +465,7 @@ class ExcelService:
                 except Exception:
                     pass
 
+        ws.cell(col_header_row, MARKER_COL, date_str)
         ws.cell(col_header_row, 1, "Fecha")
         self._apply_header_style(ws.cell(col_header_row, 1))
         ws.cell(col_header_row, 2, "Medicamento")

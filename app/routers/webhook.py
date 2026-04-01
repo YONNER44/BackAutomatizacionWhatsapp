@@ -130,14 +130,13 @@ async def process_message(message_id: int, msg_data: dict, provider: Provider):
                 await db.commit()
                 return
 
-            prices_data = await ai_parser_svc.parse_prices(text_to_parse)
-
             today = date.today()
 
-            # Filtrar: solo medicamentos que ya están en las filas de HOY.
-            # Si el proveedor respondió tarde (mensaje de ayer), solo se procesan
-            # los medicamentos que el admin ya inicializó para hoy.
-            if settings.GOOGLE_SHEET_ID and prices_data:
+            # Obtener lista de medicamentos de hoy del sheet para que la IA haga matching exacto
+            known_medications = []
+            _today_map = {}
+            _all_values = []
+            if settings.GOOGLE_SHEET_ID:
                 try:
                     import gspread as _gspread
                     sheet_name = today.strftime("%Y-%m")
@@ -146,11 +145,31 @@ async def process_message(message_id: int, msg_data: dict, provider: Provider):
                     _sheet = _spreadsheet.worksheet(sheet_name)
                     _all_values = _sheet.get_all_values()
                     _today_map = sheets_svc._get_med_row_map_by_date(_all_values, date_str)
+                    known_medications = [
+                        row[1] for row in _all_values[2:]
+                        if len(row) > 1 and row[1] and row[1] not in ("Medicamento",)
+                        and row[0].replace(" ", "") == date_str
+                    ]
+                except Exception:
+                    pass
+
+            prices_data = await ai_parser_svc.parse_prices(text_to_parse, known_medications or None)
+
+            # Filtrar: solo medicamentos que ya están en las filas de HOY.
+            if settings.GOOGLE_SHEET_ID and prices_data and _today_map:
+                try:
                     filtered = []
                     for item in prices_data:
                         key = item["medication_name"].lower()
-                        if sheets_svc._find_med_key(_today_map, key) is not None:
-                            filtered.append(item)
+                        matched_key = sheets_svc._find_med_key(_today_map, key)
+                        if matched_key is not None:
+                            # Usar el nombre canónico del sheet (evita duplicados por OCR/AI)
+                            canonical = next(
+                                (row[1] for row in _all_values[2:]
+                                 if len(row) > 1 and row[1].lower() == matched_key),
+                                item["medication_name"]
+                            )
+                            filtered.append({**item, "medication_name": canonical})
                         else:
                             logger.info(
                                 f"Medicamento ignorado (no está en filas de hoy '{date_str}'): "

@@ -160,21 +160,25 @@ async def init_monthly_sheet(
 
 
 @router.post("/init-day")
-async def init_day():
+async def init_day(db: AsyncSession = Depends(get_db)):
     """
-    Inserta el bloque de encabezado del nuevo día (Arca software + Fecha/Medicamento/Precio/Cantidad)
-    debajo de los datos existentes en el Excel y Google Sheets.
-    El dueño agrega los medicamentos y fechas manualmente debajo del encabezado.
+    Inserta el bloque de encabezado del nuevo día en el Excel y Google Sheets.
+    Si la hoja del mes está vacía (primer día), también crea la estructura de proveedores.
     """
     today = date.today()
 
-    excel_result = excel_svc.create_day_header(today)
+    providers_result = await db.execute(
+        select(Provider).where(Provider.is_active == True).order_by(Provider.name)
+    )
+    provider_names = [p.name for p in providers_result.scalars().all()]
+
+    excel_result = excel_svc.create_day_header(today, provider_names)
 
     sheets_result = {"created": False}
     sheets_error = None
     if settings.GOOGLE_SHEET_ID:
         try:
-            sheets_result = sheets_svc.create_day_header(today)
+            sheets_result = sheets_svc.create_day_header(today, provider_names)
         except Exception as e:
             sheets_error = str(e)
 

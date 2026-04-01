@@ -4,39 +4,55 @@ Backend del sistema de automatización de recolección de precios de medicamento
 
 ## Tecnologías
 
-- **Python 3.11+** + **FastAPI**
-- **WhatsApp**: whatsapp-web.js (servicio Node.js en `WhatsAppService/`)
-- **OCR + IA**: OpenAI GPT-4o-mini (Vision para imágenes, chat para extracción de precios)
-- **Base de datos**: SQLite (dev) / PostgreSQL (prod)
-- **Excel**: openpyxl
-- **Google Sheets**: gspread (fuente principal de almacenamiento)
+| Capa | Tecnología | Versión |
+|------|-----------|---------|
+| Framework web | FastAPI | 0.115.6 |
+| Servidor ASGI | Uvicorn | 0.34.0 |
+| Lenguaje | Python | 3.11 |
+| ORM / BD async | SQLAlchemy + asyncpg | 2.0.36 / 0.31.0 |
+| IA / OCR | OpenAI GPT-4o-mini | 1.66.3 |
+| Google Sheets | gspread | 6.1.4 |
+| Excel local | openpyxl | 3.1.5 |
+| Servicio WhatsApp | whatsapp-web.js (Node.js) | 1.23.0 |
+| Base de datos prod | PostgreSQL | 16 |
+| Base de datos dev | SQLite | — |
+| Contenedores | Docker + Docker Compose | — |
 
 ## Estructura del proyecto
 
 ```
-app/
-├── config.py              # Configuración y variables de entorno
-├── main.py                # Aplicación FastAPI principal + watchdog mensual
-├── database/
-│   └── db.py              # Configuración SQLAlchemy async
-├── models/
-│   ├── provider.py        # Modelo proveedor
-│   ├── message.py         # Modelo mensaje WhatsApp
-│   └── price.py           # Modelo precio/medicamento
-├── routers/
-│   ├── webhook.py         # Endpoint para recibir mensajes de whatsapp-web.js
-│   ├── providers.py       # CRUD proveedores
-│   ├── prices.py          # Consulta precios, exportar Excel, inicializar mes/día
-│   └── config.py          # Configuración dinámica de Google Sheets (credenciales, sheet ID)
-└── services/
-    ├── ocr.py             # OCR con OpenAI Vision
-    ├── ai_parser.py       # OpenAI para extraer medicamentos/precios
-    ├── excel.py           # Generación/actualización Excel local
-    ├── sheets.py          # Sincronización Google Sheets (fuente principal)
-    └── config_store.py    # Almacén de configuración en JSON (credenciales en tiempo de ejecución)
-WhatsAppService/           # Servicio Node.js que captura mensajes de WhatsApp Web
-data/
-└── app_config.json        # Configuración dinámica guardada por el cliente (creado en runtime)
+BackAutomatizacionWhatsapp/
+├── app/
+│   ├── config.py              # Configuración y variables de entorno
+│   ├── main.py                # App FastAPI + watchdog mensual (corre cada hora)
+│   ├── database/
+│   │   └── db.py              # SQLAlchemy async, migraciones
+│   ├── models/
+│   │   ├── provider.py        # Modelo proveedor (distribuidora)
+│   │   ├── message.py         # Modelo mensaje WhatsApp (estados: received/processing/processed/failed)
+│   │   └── price.py           # Modelo precio/medicamento
+│   ├── routers/
+│   │   ├── webhook.py         # Recibe mensajes de whatsapp-web.js y dispara procesamiento
+│   │   ├── providers.py       # CRUD proveedores
+│   │   ├── prices.py          # Consulta precios, inicializar mes/día, exportar Excel
+│   │   └── config.py          # Configuración dinámica de Google Sheets
+│   └── services/
+│       ├── ocr.py             # OCR con OpenAI Vision (imágenes → texto)
+│       ├── ai_parser.py       # Extracción de medicamentos/precios con OpenAI + parser regex
+│       ├── excel.py           # Gestión del archivo Excel local
+│       ├── sheets.py          # Sincronización Google Sheets (fuente principal)
+│       └── config_store.py    # Configuración dinámica en JSON (credenciales en runtime)
+├── WhatsAppService/           # Servicio Node.js (whatsapp-web.js)
+│   ├── index.js               # Escucha mensajes, envía QR, reenvía al backend
+│   ├── Dockerfile
+│   └── package.json
+├── data/
+│   └── app_config.json        # Config dinámica (creado en runtime, persistido en volumen Docker)
+├── .env                       # Variables de entorno (NO subir a Git)
+├── .env.example               # Plantilla de variables
+├── Dockerfile                 # Imagen Docker del backend Python
+├── requirements.txt           # Dependencias Python
+└── run.py                     # Punto de entrada: uvicorn en 0.0.0.0:8000
 ```
 
 ## Instalación (desarrollo local)
@@ -44,7 +60,7 @@ data/
 ```bash
 # 1. Crear entorno virtual
 python -m venv venv
-.\venv\Scripts\activate     # Windows CMD/PowerShell
+.\venv\Scripts\activate     # Windows
 source venv/bin/activate    # Linux/Mac
 
 # 2. Instalar dependencias
@@ -53,29 +69,25 @@ pip install -r requirements.txt
 # 3. Configurar variables de entorno
 cp .env.example .env
 # Editar .env con tus credenciales
-```
 
-## Correr el servidor (desarrollo local)
-
-```bash
-# En Windows, si venv está activo:
+# 4. Levantar el servidor
 python run.py
-
-# En Windows, sin activar venv:
-.\venv\Scripts\python.exe run.py
 ```
 
-El servidor queda en: http://localhost:8000
-Documentación API (Swagger): http://localhost:8000/docs
+Servidor disponible en: `http://localhost:8000`
+Documentación Swagger: `http://localhost:8000/docs`
 
-## Despliegue con Docker
+## Despliegue con Docker (producción)
 
 ```bash
 # Desde la raíz del proyecto (donde está docker-compose.yml)
 docker compose up --build -d
+
+# Solo reconstruir el backend:
+docker compose up --build -d backend
 ```
 
-Levanta automáticamente: base de datos PostgreSQL, backend Python, servicio WhatsApp Node.js y frontend React.
+Levanta automáticamente: PostgreSQL 16, backend Python, servicio WhatsApp Node.js y frontend React (nginx).
 
 ## Variables de entorno
 
@@ -84,122 +96,146 @@ Levanta automáticamente: base de datos PostgreSQL, backend Python, servicio Wha
 | `APP_NAME` | Nombre de la aplicación | `AutomatizacionWhatsapp` |
 | `DEBUG` | Modo debug | `True` |
 | `OPENAI_API_KEY` | Clave API de OpenAI | `sk-...` |
-| `OPENAI_MODEL` | Modelo de OpenAI | `gpt-4o-mini` |
-| `DATABASE_URL` | URL de la base de datos | `sqlite+aiosqlite:///./automatizacion.db` |
-| `EXCEL_OUTPUT_PATH` | Ruta del archivo Excel generado | `./output/precios.xlsx` |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Ruta al archivo JSON de credenciales Google (opcional si se configura desde la UI) | `./google_credentials.json` |
-| `GOOGLE_SHEET_ID` | ID del Google Spreadsheet (opcional si se configura desde la UI) | `1ABC...xyz` |
+| `OPENAI_MODEL` | Modelo de OpenAI a usar | `gpt-4o-mini` |
+| `DATABASE_URL` | URL de conexión a la BD | `sqlite+aiosqlite:///./automatizacion.db` |
+| `EXCEL_OUTPUT_PATH` | Ruta del Excel local generado | `./output/precios.xlsx` |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Ruta al JSON de cuenta de servicio Google | `./google_credentials.json` |
+| `GOOGLE_SHEET_ID` | ID del Google Spreadsheet | `1ABC...xyz` |
 
-> Las credenciales de Google también pueden configurarse desde la página **Configuración** del panel web, sin necesidad de editar archivos del servidor.
+> **Nota**: las credenciales de Google también pueden configurarse desde la página **Configuración** del panel web sin tocar archivos del servidor. La configuración dinámica tiene prioridad sobre el `.env`.
 
 ## Configuración dinámica de Google Sheets
 
-El sistema permite al cliente configurar sus propias credenciales de Google sin tocar archivos del servidor:
+1. Abrir la página **Configuración** (`/settings`) en el panel web.
+2. Ingresar el **ID de la Google Sheet** y subir el **JSON de cuenta de servicio**.
+3. El backend valida las credenciales y guarda la configuración en `data/app_config.json`.
+4. A partir de ese momento, el sistema usa esas credenciales para leer y escribir en la hoja.
 
-1. El cliente abre la página **Configuración** (`/settings`) en el panel web.
-2. Ingresa el **ID de su Google Sheet** y sube el archivo **JSON de cuenta de servicio**.
-3. El backend valida las credenciales, prueba la conexión y guarda la configuración en `data/app_config.json`.
-4. A partir de ese momento, el sistema usa esas credenciales para leer y escribir en la hoja del cliente.
-
-La configuración dinámica (`config_store.py`) tiene prioridad sobre las variables de entorno del `.env`.
+El archivo `data/app_config.json` se persiste en un volumen Docker bind-mounted (`./data:/app/data`), por lo que sobrevive a reinicios y rebuilds del contenedor.
 
 ## Flujo diario de operación
 
-1. **El administrador hace clic en "Inicializar día"** → el backend inserta un bloque de encabezado visual (nombres de proveedores + columnas Fecha/Medicamento/Precio/Cantidad) debajo de los datos del día anterior en Google Sheets y en el Excel local.
-2. **El administrador agrega manualmente los medicamentos del día** con su fecha directamente en las filas vacías de la hoja de Google Sheets.
-3. **El administrador envía la lista de medicamentos** a los proveedores por el grupo de WhatsApp.
-4. **Cada proveedor responde en privado** con sus precios (texto o imagen).
-5. **El sistema recibe el mensaje**, la IA extrae los precios y actualiza únicamente las filas del día actual.
-6. **Los datos de días anteriores nunca se modifican** — cada día es un grupo de filas independiente.
+```
+1. Admin hace clic en "Inicializar día"
+   └─ Si es el primer día del mes en la hoja: crea la estructura completa
+      (fila 1 proveedores + fila 2 Fecha/Medicamento/Precio/Cantidad)
+   └─ Si ya hay días previos: inserta bloque de encabezado debajo de los datos existentes
 
-## Estructura de la hoja de Google Sheets / Excel
+2. Admin agrega los medicamentos del día directamente en Google Sheets
+   └─ Escribe nombre del medicamento y fecha en las filas debajo del encabezado
 
-Cada hoja tiene el nombre del mes en formato `YYYY-MM`. La hoja tiene una estructura por bloques de días:
+3. Admin envía la lista de medicamentos a los proveedores por WhatsApp
 
-**Encabezados fijos (filas 1–2)**:
+4. Cada proveedor responde con sus precios (texto o imagen)
 
-| (fila 1) | Proveedor A | | Proveedor B | |
-|----------|-------------|--|-------------|--|
-| Fecha | Medicamento | Precio | Cantidad | Precio | Cantidad |
+5. Sistema recibe el mensaje → IA extrae precios → actualiza filas del día actual
+   └─ Solo se actualizan medicamentos que ya existen en las filas de hoy
+   └─ Medicamentos no reconocidos son ignorados
 
-- **Fila 1**: nombre del proveedor combinado sobre sus 2 columnas (Precio + Cantidad)
-- **Fila 2**: sub-encabezados fijos (Fecha, Medicamento, luego Precio/Cantidad por proveedor)
-- **Columna A**: Fecha (compartida por todos los proveedores)
+6. Precio más bajo por medicamento se resalta en verde automáticamente
+```
+
+## Estructura de Google Sheets / Excel
+
+Cada hoja tiene el nombre del mes en formato `YYYY-MM`. Estructura por bloques:
+
+**Encabezados fijos (filas 1–2) — creados al "Inicializar día" por primera vez:**
+
+| Fila 1 | Arca software ←──────→ | Brayan farmacia ←──→ | ... |
+|--------|------------------------|----------------------|-----|
+| Fila 2 | Fecha | Medicamento | Precio | Cantidad | Precio | Cantidad | ... |
+
+- **Columna A**: Fecha (compartida)
 - **Columna B**: Medicamento (compartida)
 - **Columnas C en adelante**: 2 columnas por proveedor (Precio + Cantidad)
+- **Columna Z**: Marcador invisible de fecha (para detectar duplicados de inicialización)
 
-**Bloques de días (fila 3 en adelante)**:
-
-Cada día tiene su propio bloque precedido por un encabezado visual idéntico a las filas 1–2 (en azul). El administrador agrega las filas de medicamentos debajo de ese encabezado. Ejemplo:
+**Bloques de días posteriores (desde fila 3):**
 
 ```
-[fila separadora vacía]
-[fila encabezado proveedor azul]      ← insertada por "Inicializar día"
-[fila Fecha | Medicamento | ... azul] ← insertada por "Inicializar día"
-[24/03/2026] [Aspirina 500mg] [7800] [caja] [7500] [caja]   ← agrega el admin
-[24/03/2026] [Dipirona 1g]    [NO]  [NO]   [4200] [caja]   ← agrega el admin
-[fila separadora vacía]
-[fila encabezado proveedor azul]      ← día siguiente
-...
+[fila vacía de separación]
+[fila azul: nombres de proveedores]      ← insertada por "Inicializar día"
+[fila azul: Fecha | Medicamento | ...]   ← insertada por "Inicializar día"
+[31/03/2026] [Aspirina 500mg]  [7,800] [caja]  [12,800] [caja]
+[31/03/2026] [Dipirona 500mg]  [5,700] [unidad] [3,700] [unidad]
+[31/03/2026] [Tinox rg 2.5mg]  [32,830][caja]  [NO]     [NO]
 ```
 
-- El precio más bajo de cada medicamento se resalta en verde automáticamente.
+- El precio más bajo por medicamento se resalta en **verde** (solo si no todos son iguales).
 - Las celdas sin precio llevan el valor `NO`.
+- Los días anteriores **nunca se modifican**.
 
-## Lógica de actualización por día
+## Lógica de coincidencia de medicamentos
 
-Cuando un proveedor responde:
+Cuando un proveedor responde, el sistema identifica los medicamentos del mensaje usando 4 niveles:
 
-- El sistema obtiene **solo las filas que tienen la fecha de hoy** en la columna A.
-- Busca cada medicamento del mensaje en esas filas (con coincidencia exacta, por palabras o fuzzy ≥ 80%).
-- Si el medicamento existe en las filas de hoy → actualiza Precio y Cantidad.
-- Si el medicamento **no** está en las filas de hoy → se **ignora** completamente.
-- Si un proveedor responde tarde (al día siguiente), el sistema busca el medicamento solo en las filas de hoy. Si no existe, lo ignora; si existe, lo actualiza.
-- Los días anteriores **nunca se tocan**.
+1. **Exacto** (case-insensitive): `"aspirina 500mg"` == `"Aspirina 500mg"`
+2. **Subconjunto de palabras**: `"aspirina"` encontrado en `"Aspirina 500mg tabletas"`
+3. **Nombres normalizados**: quita paréntesis y sufijos de empaque antes de comparar  
+   `"Tinox (RG)"` → `"tinox rg"`, `"Caja X 30 UNDS"` → ignorado
+4. **Fuzzy ≥ 80%**: tolera typos, abreviaciones de OCR  
+   `"asprina 500"` → `"Aspirina 500mg"` (87% similitud)
 
-## Inicialización mensual
+Además, antes de parsear el mensaje la IA recibe la lista de medicamentos conocidos del día para hacer matching canónico directo (evita duplicados por nombres distintos del mismo medicamento).
 
-Al inicio de cada mes se crea la hoja vacía con los proveedores activos (sin medicamentos). Esto ocurre:
+## Inicialización mensual automática
 
-- **Automáticamente**: un watchdog en background revisa cada hora si existe la hoja del mes y la crea si falta.
-- **Manualmente**: botón "Inicializar [mes]" en el Dashboard del frontend.
+Al inicio de cada mes, el watchdog en background crea automáticamente la pestaña vacía (`YYYY-MM`) en Google Sheets y en el Excel local. La creación automática **solo crea la pestaña vacía** — sin formato ni encabezados. El formato completo (proveedores + columnas) se crea cuando el administrador hace clic en **"Inicializar día"** por primera vez.
 
-Si la hoja ya existe y no se pasa `force=True`, no se modifica ni se borran datos.
+Comportamiento:
+- **Automático**: watchdog revisa cada hora, crea la pestaña si no existe.
+- **Manual**: botón "Inicializar [mes]" en el Dashboard (también crea solo la pestaña vacía).
+- Si la hoja ya existe y no se pasa `force=True`, no se toca.
+- Con `force=True` (botón con confirmación): elimina y recrea la pestaña vacía.
 
 ## Endpoints principales
 
 | Método | Ruta | Descripción |
 |--------|------|-------------|
-| POST | `/api/webhook/whatsapp-web` | Recibir mensajes desde whatsapp-web.js |
-| GET | `/providers` | Listar proveedores |
-| POST | `/providers` | Crear proveedor |
-| PUT | `/providers/{id}` | Actualizar proveedor |
-| DELETE | `/providers/{id}` | Eliminar proveedor |
-| GET | `/prices` | Consultar precios (filtros: medication, provider_id, date_from, date_to, limit) |
-| GET | `/prices/summary` | Resumen estadístico |
-| POST | `/prices/init-month` | Crear hoja del mes actual en Google Sheets y Excel (sin medicamentos) |
-| POST | `/prices/init-day` | Insertar bloque de encabezado del día actual debajo de los datos existentes |
-| GET | `/prices/export/excel` | Generar y descargar Excel desde la base de datos |
-| DELETE | `/prices/{id}` | Eliminar registro de precio por ID |
-| GET | `/config/status` | Estado de conexión con Google Sheets (credenciales, sheet ID, conectado) |
-| POST | `/config/google` | Guardar ID de hoja y/o archivo JSON de credenciales de Google |
+| `GET` | `/health` | Estado del servidor |
+| `POST` | `/api/webhook/whatsapp-web` | Recibir mensajes de whatsapp-web.js |
+| `GET` | `/providers` | Listar proveedores activos e inactivos |
+| `POST` | `/providers` | Crear proveedor (phone_number, name) |
+| `PUT` | `/providers/{id}` | Actualizar proveedor |
+| `DELETE` | `/providers/{id}` | Eliminar proveedor |
+| `GET` | `/prices` | Consultar precios (filtros: medication, provider_id, date_from, date_to, limit) |
+| `GET` | `/prices/summary` | Resumen estadístico (total precios, medicamentos, Excel) |
+| `DELETE` | `/prices/{id}` | Eliminar registro de precio |
+| `GET` | `/prices/export/excel` | Descargar Excel generado desde la BD |
+| `POST` | `/prices/init-month` | Crear pestaña vacía del mes en Sheets/Excel |
+| `POST` | `/prices/init-day` | Inicializar estructura del día (primer día) o nuevo bloque (días posteriores) |
+| `GET` | `/config/status` | Estado de conexión con Google Sheets |
+| `POST` | `/config/google` | Guardar sheet ID y/o credenciales JSON |
 
 ### Detalle de endpoints clave
 
-**`POST /prices/init-month?force=false`**
-Crea la hoja mensual en Google Sheets y en el Excel local con el formato de proveedores (filas 1–2) pero sin medicamentos. Si la hoja ya existe y `force=false`, retorna advertencia sin modificar nada. Con `force=true` elimina y recrea la hoja.
+**`POST /prices/init-month?force=false`**  
+Crea la pestaña `YYYY-MM` vacía (sin formato ni proveedores) en Google Sheets y en el Excel local. Si la pestaña ya existe y `force=false`, retorna advertencia sin modificar. Con `force=true` elimina y recrea.
 
-**`POST /prices/init-day`**
-Inserta debajo del último dato existente: una fila vacía de separación, una fila con los nombres de los proveedores (estilo azul), y una fila con los sub-encabezados Fecha/Medicamento/Precio/Cantidad (estilo azul). El administrador agrega las filas de medicamentos manualmente. Si el encabezado del día ya existe, no se duplica.
+**`POST /prices/init-day`**  
+- **Primera vez en el mes** (hoja vacía): crea la estructura completa — fila 1 con nombres de proveedores activos (celda azul, celdas combinadas), fila 2 con Fecha/Medicamento/Precio/Cantidad (azul).  
+- **Días posteriores**: inserta fila vacía de separación + fila azul de proveedores + fila azul de sub-encabezados debajo del último dato.  
+- Si el día ya fue inicializado (marcador en col Z), retorna `"created": false` sin duplicar.
 
-**`POST /api/webhook/whatsapp-web`**
-Recibe el payload JSON de whatsapp-web.js, identifica al proveedor por número telefónico, extrae precios con IA (y OCR si es imagen), filtra solo los medicamentos presentes en las filas de hoy, y actualiza Google Sheets + Excel + base de datos. Ignora mensajes duplicados.
+**`POST /api/webhook/whatsapp-web`**  
+Recibe el payload JSON de whatsapp-web.js, identifica al proveedor por número telefónico (normalización E.164 y 10 dígitos), extrae precios con IA (y OCR si es imagen), filtra solo los medicamentos en las filas de hoy, y actualiza Google Sheets + Excel + base de datos. Ignora mensajes duplicados por `messageId`.
 
-**`GET /prices/export/excel`**
-Genera en memoria un archivo `.xlsx` con todos los precios de la base de datos, una hoja por mes, en el mismo formato de columnas que Google Sheets. Devuelve el archivo como descarga directa.
+**`GET /prices/export/excel`**  
+Genera en memoria un `.xlsx` con todos los precios de la BD (una hoja por mes, mismo formato que Google Sheets). Devuelve como descarga directa.
 
-**`GET /config/status`**
-Retorna el estado actual de la integración con Google Sheets: si hay credenciales guardadas, el email de la cuenta de servicio, el sheet ID configurado y si la conexión está activa.
+## Servicio WhatsApp (Node.js)
 
-**`POST /config/google`**
-Recibe `sheet_id` (Form) y opcionalmente `credentials` (archivo JSON multipart). Valida que el JSON sea una cuenta de servicio de Google (`type: service_account`), guarda la configuración en `data/app_config.json` e invalida el caché del servicio. Retorna si la conexión fue exitosa.
+Ubicado en `WhatsAppService/`. Usa `whatsapp-web.js` con Puppeteer/Chromium headless.
+
+**Variable de entorno requerida:**
+```
+BACKEND_URL=http://backend:8000   # En Docker (nombre de servicio)
+BACKEND_URL=http://localhost:8000  # En desarrollo local
+```
+
+**Endpoints expuestos (puerto 3000):**
+- `GET /qr` → retorna el QR actual como JSON `{ qr: "..." }` o estado de la sesión
+- `GET /status` → estado de la sesión WhatsApp
+- `POST /send` → enviar mensaje (uso interno)
+
+**Sesión persistente:** Los datos de Chrome se guardan en `session-data/` (volumen Docker `whatsapp_session`). Una vez escaneado el QR, la sesión persiste entre reinicios.

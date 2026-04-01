@@ -5,8 +5,31 @@ import axios from 'axios';
 import express from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
+import fs from 'fs';
 
 dotenv.config();
+
+// Eliminar archivos de bloqueo de Chromium recursivamente en session-data
+function cleanChromiumLocks(dir = './session-data') {
+    const lockNames = ['SingletonLock', 'SingletonSocket', '.org.chromium.Chromium'];
+    try {
+        if (!fs.existsSync(dir)) return;
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        for (const entry of entries) {
+            const fullPath = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+                cleanChromiumLocks(fullPath);
+            } else if (lockNames.includes(entry.name)) {
+                try {
+                    fs.unlinkSync(fullPath);
+                    console.log(`🧹 Lock eliminado: ${fullPath}`);
+                } catch (_) {}
+            }
+        }
+    } catch (_) {}
+}
+
+cleanChromiumLocks();
 
 const app = express();
 const PORT = process.env.PORT || 3000;

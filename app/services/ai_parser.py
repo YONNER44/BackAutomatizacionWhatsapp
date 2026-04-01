@@ -6,19 +6,20 @@ from app.config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-SYSTEM_PROMPT = """Eres un asistente especializado en extraer listas de precios de medicamentos.
-Tu tarea es analizar el texto proporcionado (ya sea de un mensaje de WhatsApp o extraído de una imagen)
-y devolver un JSON estructurado con los medicamentos y sus precios.
+SYSTEM_PROMPT = """Eres un asistente especializado en extraer listas de precios de medicamentos de mensajes de WhatsApp o imágenes de cotizaciones.
 
 Reglas:
 - Extrae solo medicamentos con precio
-- Conserva el nombre COMPLETO del medicamento incluyendo dosis y presentación (ej: "Aspirina 500mg", "Dipirona 500mg", "Sertralina 100mg")
-- NO abrevies ni omitas la dosis del nombre (NUNCA pongas solo "Dipirona" si el texto dice "Dipirona 500mg")
-- Primera letra en mayúscula, resto en minúscula
 - El precio debe ser un número (float) sin formato, sin signos de moneda
-- Si hay unidad de empaque (caja, frasco, tableta, etc.), inclúyela en el campo "unit"
+- Si hay unidad de empaque (caja, frasco, tableta, inhalador, etc.), inclúyela en el campo "unit"
 - Ignora encabezados, fechas, saludos y texto que no sea lista de precios
-- Si no encuentras medicamentos con precio, devuelve una lista vacía
+- Si no encuentras medicamentos con precio, devuelve lista vacía
+
+Reglas de nombre:
+- Primera letra en mayúscula, resto en minúscula
+- Conserva dosis y presentación (ej: "Aspirina 500mg", "Dipirona 500mg")
+- Si se proporciona una LISTA DE MEDICAMENTOS CONOCIDOS, usa SIEMPRE el nombre exacto de esa lista cuando el medicamento del mensaje corresponda a uno de ellos (aunque esté abreviado, tenga typos o variaciones). Ejemplo: si la lista tiene "Salbumed salbutamol 100 mcg" y el mensaje dice "salbum salbuta 100mcg", usa "Salbumed salbutamol 100 mcg"
+- Si el medicamento del mensaje NO corresponde a ninguno de la lista, usa el nombre tal como aparece en el mensaje
 
 Formato de respuesta (JSON):
 {
@@ -38,13 +39,19 @@ class AIParserService:
         self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
         self.model = settings.OPENAI_MODEL
 
-    async def parse_prices(self, text: str) -> list[dict]:
+    async def parse_prices(self, text: str, known_medications: list[str] = None) -> list[dict]:
         """
         Extrae medicamentos y precios del texto usando OpenAI o parser local.
+        known_medications: lista de nombres canónicos del sheet para que la IA haga matching exacto.
         Retorna una lista de dicts con: medication_name, price, unit.
         """
         if not text or not text.strip():
             return []
+
+        user_content = f"Extrae los medicamentos y precios del siguiente texto:\n\n{text}"
+        if known_medications:
+            med_list = "\n".join(f"- {m}" for m in known_medications)
+            user_content += f"\n\nLISTA DE MEDICAMENTOS CONOCIDOS (usa estos nombres exactos cuando corresponda):\n{med_list}"
 
         # Intentar con OpenAI
         try:
@@ -52,7 +59,7 @@ class AIParserService:
                 model=self.model,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": f"Extrae los medicamentos y precios del siguiente texto:\n\n{text}"},
+                    {"role": "user", "content": user_content},
                 ],
                 response_format={"type": "json_object"},
                 temperature=0,

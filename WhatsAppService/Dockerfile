@@ -17,10 +17,12 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 
 COPY index.js .
+COPY start.sh .
+RUN chmod +x start.sh
 
 # Sesión de WhatsApp persistente (montar como volumen)
 RUN mkdir -p session-data
 
 EXPOSE 3000
 
-CMD ["node", "index.js"]
+CMD ["sh", "start.sh"]

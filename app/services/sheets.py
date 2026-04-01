@@ -96,15 +96,11 @@ class SheetsService:
         return self._spreadsheet
 
     def _get_or_create_monthly_sheet(self, spreadsheet, sheet_name: str):
-        """Obtiene o crea la hoja mensual (ej: '2026-03')."""
+        """Obtiene o crea la hoja mensual (ej: '2026-03'). Se crea vacía sin formato."""
         try:
             return spreadsheet.worksheet(sheet_name)
         except gspread.WorksheetNotFound:
             ws = spreadsheet.add_worksheet(title=sheet_name, rows=500, cols=50)
-            # Fila 2: encabezados compartidos Fecha y Medicamento
-            ws.update(f"A{COL_HEADER_ROW}:B{COL_HEADER_ROW}", [["Fecha", "Medicamento"]])
-            ws.format(f"A{COL_HEADER_ROW}", COL_HEADER_STYLE)
-            ws.format(f"B{COL_HEADER_ROW}", COL_HEADER_STYLE)
             return ws
 
     def _get_or_create_provider_col(self, sheet, provider_name: str) -> int:
@@ -208,17 +204,36 @@ class SheetsService:
         med_map = {}
         for idx, row in enumerate(all_values[DATA_START_ROW - 1:], start=DATA_START_ROW):
             if len(row) >= MED_COL and row[MED_COL - 1]:
-                row_date = row[FECHA_COL - 1] if len(row) >= FECHA_COL else ""
+                row_date = row[FECHA_COL - 1].replace(" ", "") if len(row) >= FECHA_COL else ""
                 if row_date == date_str:
                     med_map[row[MED_COL - 1].lower()] = idx
         return med_map
 
+    @staticmethod
+    def _normalize_med_name(name: str) -> str:
+        """
+        Normaliza nombre de medicamento para comparación:
+        - Quita paréntesis y su contenido: "Tinox (RG)" → "Tinox RG"
+        - Quita sufijos de empaque: "CAJA X 30 UNDS", "FRASCO 500 ML", etc.
+        - Colapsa espacios
+        """
+        import re
+        # Quitar paréntesis pero conservar el contenido: "(RG)" → "RG"
+        name = re.sub(r'\(([^)]*)\)', r'\1', name)
+        # Quitar sufijos de empaque comunes al final
+        name = re.sub(
+            r'\s+(FRASCO|CAJA|TABLETAS?|TABS?|CAPS?|COMP|AMP|SOB|UND[S]?|UNID|ML|MG|GR|MCG)'
+            r'(\s+\d+.*)?$', '', name, flags=re.IGNORECASE
+        )
+        return re.sub(r'\s+', ' ', name).strip().lower()
+
     def _find_med_key(self, med_row_map: dict, search_key: str) -> str | None:
         """
-        Busca medicamento con coincidencia flexible (3 niveles):
+        Busca medicamento con coincidencia flexible (4 niveles):
         1. Exacto (case-insensitive)
-        2. Palabras: "dipirona" coincide con "dipirona 500mg"
-        3. Similitud por typos: "aspiria" coincide con "aspirina" (umbral 80%)
+        2. Subset de palabras
+        3. Nombres normalizados (sin paréntesis ni sufijos de empaque)
+        4. Similitud fuzzy (umbral 80%)
         """
         from difflib import SequenceMatcher
 
@@ -240,12 +255,25 @@ class SheetsService:
         if best_word_match:
             return best_word_match
 
-        # 3. Similitud por caracteres (maneja typos como "aspiria" → "aspirina")
+        # 3. Comparación con nombres normalizados (quita paréntesis y sufijos de empaque)
+        norm_search = self._normalize_med_name(search_key)
+        norm_search_words = set(norm_search.split())
+        for existing_key in med_row_map:
+            norm_existing = self._normalize_med_name(existing_key)
+            norm_existing_words = set(norm_existing.split())
+            if (norm_search == norm_existing or
+                    norm_search_words.issubset(norm_existing_words) or
+                    norm_existing_words.issubset(norm_search_words)):
+                logger.info(f"Coincidencia normalizada: '{search_key}' → '{existing_key}'")
+                return existing_key
+
+        # 4. Similitud fuzzy sobre nombres normalizados (maneja typos)
         THRESHOLD = 0.80
         best_match = None
         best_ratio = 0.0
         for existing_key in med_row_map:
-            ratio = SequenceMatcher(None, search_key, existing_key).ratio()
+            norm_existing = self._normalize_med_name(existing_key)
+            ratio = SequenceMatcher(None, norm_search, norm_existing).ratio()
             if ratio >= THRESHOLD and ratio > best_ratio:
                 best_ratio = ratio
                 best_match = existing_key
@@ -292,10 +320,11 @@ class SheetsService:
                 continue
 
             min_price = min(v for _, v in prices)
+            all_equal = all(v == min_price for _, v in prices)
 
             for col, val in prices:
                 cell = rowcol_to_a1(idx, col)
-                style = GREEN_STYLE if val == min_price else NO_STYLE
+                style = GREEN_STYLE if (val == min_price and not all_equal) else NO_STYLE
                 try:
                     sheet.format(cell, style)
                 except Exception as e:
@@ -469,9 +498,9 @@ class SheetsService:
         force: bool = False,
     ) -> bool:
         """
-        Crea la hoja del mes en Google Sheets con el formato y los proveedores.
-        Sin medicamentos — se agregan cuando lleguen precios por WhatsApp.
-        Si force=True elimina la hoja existente y la recrea.
+        Crea la hoja del mes en Google Sheets como pestaña vacía (sin formato ni encabezados).
+        El formato se crea cuando el usuario pulsa "Inicializar día".
+        Si force=True elimina la hoja existente y la recrea vacía.
         Retorna True si se creó, False si ya existía (y no se forzó).
         """
         if not self._get_sheet_id():
@@ -494,34 +523,23 @@ class SheetsService:
                 spreadsheet.del_worksheet(existing)
                 logger.info(f"Hoja Sheets '{sheet_name}' eliminada para recrear")
 
-            # Crear hoja nueva
-            ws = spreadsheet.add_worksheet(title=sheet_name, rows=500, cols=50)
-
-            # Fila 2: encabezados fijos Fecha y Medicamento
-            ws.update(f"A{COL_HEADER_ROW}:B{COL_HEADER_ROW}", [["Fecha", "Medicamento"]])
-            ws.format(f"A{COL_HEADER_ROW}", COL_HEADER_STYLE)
-            ws.format(f"B{COL_HEADER_ROW}", COL_HEADER_STYLE)
-
-            # Crear columnas de proveedores
-            for prov_name in provider_names:
-                self._get_or_create_provider_col(ws, prov_name)
-
-            logger.info(
-                f"Hoja Sheets '{sheet_name}' creada con {len(provider_names)} proveedor(es)"
-            )
+            # Crear hoja nueva vacía — el formato se aplica en create_day_header
+            spreadsheet.add_worksheet(title=sheet_name, rows=500, cols=50)
+            logger.info(f"Hoja Sheets '{sheet_name}' creada (vacía, sin formato)")
             return True
 
         except Exception as e:
             logger.error(f"Error creando hoja mensual en Sheets: {e}")
             raise
 
-    def create_day_header(self, target_date: date = None) -> dict:
+    def create_day_header(
+        self, target_date: date = None, provider_names: list[str] | None = None
+    ) -> dict:
         """
-        Inserta el bloque de encabezado del nuevo día en Google Sheets:
-          - Fila vacía de separación
-          - Fila con nombre(s) de proveedor(es) (estilo azul, igual que fila 1)
-          - Fila con Fecha | Medicamento | Precio | Cantidad (estilo azul, igual que fila 2)
-        El dueño agrega los medicamentos y fechas manualmente debajo.
+        Inserta el bloque de encabezado del nuevo día en Google Sheets.
+        Si la hoja está vacía (primer día del mes), crea la estructura completa
+        (filas 1-2 con proveedores y sub-encabezados) usando provider_names.
+        Para días posteriores añade un nuevo bloque debajo de los datos existentes.
         Retorna {"created": bool}.
         """
         if not self._get_sheet_id():
@@ -537,32 +555,58 @@ class SheetsService:
             from gspread.utils import rowcol_to_a1
 
             all_values = sheet.get_all_values()
+            date_str = target_date.strftime("%d/%m/%Y")
+            MARKER_COL = 26  # Columna Z — invisible para el usuario
 
-            # Columnas de proveedores existentes
+            # Buscar marcador desde COL_HEADER_ROW (fila 2) para cubrir también el primer día
+            for idx, row in enumerate(all_values[COL_HEADER_ROW - 1:], start=COL_HEADER_ROW):
+                if len(row) >= MARKER_COL and row[MARKER_COL - 1] == date_str:
+                    if row[MED_COL - 1].strip():
+                        logger.info(f"Sheets: encabezado del día {date_str} ya existe, no se duplica")
+                        return {"created": False}
+                    # Marcador huérfano → limpiar y permitir reinicialización
+                    logger.info(f"Sheets: marcador huérfano en fila {idx}, limpiando y recreando")
+                    sheet.update(values=[[""]], range_name=rowcol_to_a1(idx, MARKER_COL))
+
+            # Detectar si la hoja está vacía (sin estructura de proveedores)
             col_headers = all_values[COL_HEADER_ROW - 1] if len(all_values) >= COL_HEADER_ROW else []
             price_cols = [
                 i + 1 for i, v in enumerate(col_headers)
                 if v == "Precio" and i + 1 >= FIRST_PROVIDER_COL
             ]
+            is_blank = not price_cols
 
-            # Verificar si el encabezado del día ya fue creado:
-            # buscar una fila con "Fecha" en col A después de los encabezados fijos (fila 2)
-            for row in all_values[DATA_START_ROW - 1:]:
-                if len(row) >= FECHA_COL and row[FECHA_COL - 1] == "Fecha":
-                    logger.info("Sheets: encabezado de día ya existe, no se duplica")
+            if is_blank:
+                # Primer día del mes: crear estructura inicial (filas 1-2) con los proveedores
+                if not provider_names:
+                    logger.warning("Sheets: hoja vacía pero no se proporcionaron proveedores")
                     return {"created": False}
+                # Fila 2: encabezados fijos Fecha y Medicamento (cols A y B)
+                sheet.update(f"A{COL_HEADER_ROW}:B{COL_HEADER_ROW}", [["Fecha", "Medicamento"]])
+                sheet.format(f"A{COL_HEADER_ROW}", COL_HEADER_STYLE)
+                sheet.format(f"B{COL_HEADER_ROW}", COL_HEADER_STYLE)
+                for prov_name in provider_names:
+                    self._get_or_create_provider_col(sheet, prov_name)
+                # Marcador en col Z de COL_HEADER_ROW (fila 2)
+                sheet.update(values=[[date_str]], range_name=rowcol_to_a1(COL_HEADER_ROW, MARKER_COL))
+                logger.info(
+                    f"Sheets: estructura inicial del mes creada con {len(provider_names)} proveedor(es)"
+                )
+                return {"created": True}
 
+            # Día posterior: añadir nuevo bloque debajo de los datos existentes
             all_med_map = self._get_med_row_map(sheet, all_values)
-            # Fila siguiente a todos los datos existentes (+ 1 de separador)
-            next_row = (max(all_med_map.values()) + 2) if all_med_map else DATA_START_ROW
-
-            prov_header_row = next_row
-            col_header_row = next_row + 1
+            last_data_row = max(all_med_map.values()) if all_med_map else DATA_START_ROW - 1
+            prov_header_row = last_data_row + 2
+            col_header_row = prov_header_row + 1
 
             prov_row_values = all_values[PROVIDER_ROW - 1] if len(all_values) >= PROVIDER_ROW else []
 
             batch_updates = []
             last_col = max(price_cols) + 1 if price_cols else MED_COL
+
+            # Marcador invisible en col Z del col_header_row para detectar duplicados después
+            batch_updates.append({"range": rowcol_to_a1(col_header_row, MARKER_COL), "values": [[date_str]]})
 
             # Fila encabezado de proveedor — igual que fila 1:
             # el primer proveedor arranca desde col A (FECHA_COL) con merge hasta el final,
